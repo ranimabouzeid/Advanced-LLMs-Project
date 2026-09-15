@@ -1,0 +1,7 @@
+langgraph
+langchain
+pydantic
+fastapi[standard]
+python-dotenv
+networkx
+pytest
