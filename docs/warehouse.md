@@ -1,7 +1,8 @@
 # SWARMDOCK warehouse: domain model and deterministic simulation
 
-This phase implements data and sequential actions only. There is no pathfinding,
-order execution, charging process, LangGraph, LLM agent, HTTP service, or UI.
+The current implementation includes domain data, sequential actions, and deterministic
+A* route planning. There is no order execution, charging process, LangGraph,
+LLM agent, HTTP service, or UI.
 
 ## Layout and conventions
 
@@ -104,9 +105,68 @@ warehouse.remove_blocked_cell(Position(x=2, y=0))
 `app` is importable from `backend/` or through pytest's configured Python path;
 the project is not installed as an editable Python distribution.
 
+## Deterministic A* route planning
+
+`backend/app/warehouse/routing.py` exports the pure function:
+
+```python
+astar_path(width, height, start, goal, obstacles=(), blocked_cells=())
+```
+
+Start, goal, and obstacle collections use `Position` values. The function accepts
+any positive integer dimensions, although `WarehouseState` remains fixed at 10x10.
+It returns a `list[Position]` including both endpoints, or `None` if disconnected
+or if either endpoint is obstructed. A free start equal to the goal returns
+`[start]`. Invalid dimensions or out-of-bounds input cells raise `ValueError`.
+Obstacle collections can be lists, sets, or other iterables; overlap is harmless.
+
+A* uses a priority queue ordered by `f = g + h`:
+
+- `g`: number of steps taken from the start.
+- `h`: Manhattan distance, `abs(x - goal.x) + abs(y - goal.y)`.
+
+Every move is orthogonal and costs one, so Manhattan distance never overestimates
+the remaining cost. A* keeps the cheapest known cost for each cell, records its
+predecessor, and reconstructs a shortest route when the goal is removed from the
+queue. If the queue empties, no route exists. Neighbors are considered in `+x`,
+`+y`, `-x`, `-y` order, with insertion order breaking equal queue priorities.
+This makes equal-length route selection deterministic, independent of obstacle
+collection order. The function does not mutate inputs or simulation state.
+
+Example using an existing simulation (imports work from `backend/`):
+
+```python
+from app.warehouse import Position, WarehouseSimulation, astar_path
+
+warehouse = WarehouseSimulation()
+snapshot = warehouse.state
+robot = warehouse.get_robot("robot-1")
+other_positions = {r.position for r in snapshot.robots if r.id != robot.id}
+route = astar_path(
+    snapshot.width, snapshot.height, robot.position, Position(x=8, y=7),
+    snapshot.obstacles, snapshot.blocked_cells | other_positions,
+)
+if route is not None:
+    print([(cell.x, cell.y) for cell in route])
+    print("Steps:", len(route) - 1)
+    # Optional execution remains a separate, validated operation:
+    for cell in route[1:]:
+        warehouse.move_robot(robot.id, cell)
+```
+
+Other robots are not implicit routing inputs: include their current positions
+in `blocked_cells` when appropriate. This is a snapshot route, not a time-based
+collision prediction or battery feasibility check. `move_robot` still validates
+every executed step. If a new block appears after planning, replan using a fresh
+snapshot; the old route is not modified automatically.
+
+Routing tests cover required scenarios, invalid inputs, stable tie-breaking,
+rectangular grids, simulation integration, and an independent breadth-first
+search comparison across all 128 obstacle layouts of a 3x3 grid with fixed free
+endpoints. Breadth-first search exists only in tests; production routing is A*.
+
 ## Next boundary
 
-This request combines the original roadmap's domain-model and basic simulation
-steps, with focused tests. A* routing is the next proposed implementation step
-and requires a new explicit request. Pickup/delivery execution and later graph
-integration are still future work.
+The original roadmap's domain-model, basic simulation, and A* steps now have
+focused tests. Further validation, pickup/delivery execution, and graph integration
+remain future work and require an explicit request.

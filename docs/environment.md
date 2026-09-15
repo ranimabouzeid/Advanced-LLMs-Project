@@ -38,7 +38,8 @@ pins; future installations can resolve newer versions.
 
 Phase 1 added environment setup only. The subsequent user-authorized Phase 2 added
 domain models and basic simulation; see [warehouse usage](warehouse.md).
-There is no React initialization, FastAPI service, LangGraph agent, or pathfinding.
+The subsequent routing phase added deterministic A* pathfinding. There is no
+React initialization, FastAPI service, or LangGraph agent.
 
 Run the tests from the repository root:
 

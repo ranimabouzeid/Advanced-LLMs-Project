@@ -12,7 +12,8 @@ The project is intentionally structured in phases. The application is not to be 
 - All seven requested dependencies are installed and import successfully; `pip check` reports no broken requirements.
 - The user-authorized Phase 2 combines warehouse domain models and basic deterministic simulation, originally roadmap steps 2 and 3. Both are implemented under `backend/app/warehouse/` with 59 passing tests.
 - The simulation supports initialization, inspection, pending orders, blocked-cell changes, and validated adjacent movement. See `docs/warehouse.md` for conventions.
-- No pathfinding, graph agents, API, or React application have been implemented. Further implementation requires an explicit user request.
+- Deterministic A* is implemented in `backend/app/warehouse/routing.py`, with 26 routing cases and 85 total passing tests. It returns a shortest endpoint-inclusive route or `None`; invalid dimensions/out-of-bounds inputs raise `ValueError`.
+- No graph agents, API, or React application have been implemented. Further implementation requires an explicit user request.
 - Future architecture and file examples below are design requirements, not authorization to create the whole application.
 - Update this status only when a phase has actually been completed and verified.
 
@@ -27,8 +28,10 @@ backend/app/__init__.py
 backend/app/warehouse/__init__.py
 backend/app/warehouse/models.py
 backend/app/warehouse/simulation.py
+backend/app/warehouse/routing.py
 backend/tests/test_models.py
 backend/tests/test_simulation.py
+backend/tests/test_routing.py
 pytest.ini
 frontend/.gitkeep
 docs/environment.md
@@ -307,13 +310,13 @@ Basic checks from the repository root:
 git status --short
 ```
 
-The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 59 passing deterministic cases. Do not edit unrelated parent configuration.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 85 passing deterministic cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 
 ## Execution Constraints for This Repository
 
-- Environment setup and the requested domain model/basic simulation are complete. Do not implement later phases without an explicit request.
+- Environment setup, domain models, basic simulation, and deterministic A* are complete with focused tests. Do not implement later phases without an explicit request.
 - No application code should be added before the environment and architecture are documented and understood.
 - Future code should follow the above sequence and keep each phase minimal and verifiable.
 - Any implementation must preserve the agent-role boundaries and shared-state design described above.
