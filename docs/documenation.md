@@ -1,5 +1,10 @@
 # SWARMDOCK: Programming Phase and A* Pathfinding
 
+> This presentation records the foundation and A* phase (85 tests at that time).
+> Subsequent work added lifecycle primitives, complete delivery planning, and typed
+> validation, bringing the suite to 148 tests. See [current warehouse documentation](warehouse.md)
+> for those additions. Atomic full-delivery execution remains deferred.
+
 ## 1. Project introduction
 
 SWARMDOCK is a university project for an autonomous multi-agent warehouse

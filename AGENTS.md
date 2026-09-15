@@ -13,6 +13,8 @@ The project is intentionally structured in phases. The application is not to be 
 - The user-authorized Phase 2 combines warehouse domain models and basic deterministic simulation, originally roadmap steps 2 and 3. Both are implemented under `backend/app/warehouse/` with 59 passing tests.
 - The simulation supports initialization, inspection, pending orders, blocked-cell changes, and validated adjacent movement. See `docs/warehouse.md` for conventions.
 - Deterministic A* is implemented in `backend/app/warehouse/routing.py`, with 26 routing cases and 85 total passing tests. It returns a shortest endpoint-inclusive route or `None`; invalid dimensions/out-of-bounds inputs raise `ValueError`.
+- The latest authorized portion of Milestone A adds assignment/pickup/delivery primitives, two-leg A* plans, warehouse revision tracking, and typed route/delivery validation. The updated full suite has 148 passing cases.
+- Atomic full-delivery execution is explicitly deferred by the latest user request. Milestone A as originally planned is not fully complete; do not begin later milestones.
 - No graph agents, API, or React application have been implemented. Further implementation requires an explicit user request.
 - Future architecture and file examples below are design requirements, not authorization to create the whole application.
 - Update this status only when a phase has actually been completed and verified.
@@ -29,9 +31,11 @@ backend/app/warehouse/__init__.py
 backend/app/warehouse/models.py
 backend/app/warehouse/simulation.py
 backend/app/warehouse/routing.py
+backend/app/warehouse/validation.py
 backend/tests/test_models.py
 backend/tests/test_simulation.py
 backend/tests/test_routing.py
+backend/tests/test_validation.py
 pytest.ini
 frontend/.gitkeep
 docs/environment.md
@@ -310,7 +314,7 @@ Basic checks from the repository root:
 git status --short
 ```
 
-The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 85 passing deterministic cases. Do not edit unrelated parent configuration.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 148 passing deterministic cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 

@@ -158,3 +158,59 @@ def test_optimality_against_breadth_first_search_for_all_small_layouts():
             else:
                 assert_valid_route(route, 3, 3, start, goal, obstacles)
                 assert len(route) - 1 == distance
+
+
+def test_delivery_planner_uses_both_astar_legs_and_actual_detour_cost():
+    from app.warehouse import plan_delivery, validate_delivery_plan, WarehouseState
+
+    data = WarehouseSimulation().state.model_dump()
+    data["robots"][0]["battery"] = 9  # Manhattan total is 9, actual detour is 11.
+    simulation = WarehouseSimulation(WarehouseState.model_validate(data))
+    simulation.add_blocked_cell(Position(x=1, y=0))
+    simulation.create_order("o", "p", Position(x=2, y=0), Position(x=9, y=0))
+    before = simulation.state
+    # Robot-2 blocks the only escape at (0,1); relocate it in this test fixture.
+    data = before.model_dump()
+    data["robots"][1]["position"] = {"x": 5, "y": 9}
+    simulation = WarehouseSimulation(WarehouseState.model_validate(data))
+    before = simulation.state
+    plan = plan_delivery(before, "o", "robot-1")
+    occupied = {robot.position for robot in before.robots if robot.id != "robot-1"}
+    assert list(plan.pickup_route) == astar_path(10, 10, Position(x=0, y=0), Position(x=2, y=0),
+                                               before.obstacles, before.blocked_cells | occupied)
+    assert list(plan.delivery_route) == astar_path(10, 10, Position(x=2, y=0), Position(x=9, y=0),
+                                                 before.obstacles, before.blocked_cells | occupied)
+    assert plan.total_steps == 11
+    assert plan.warehouse_revision == before.revision
+    assert not validate_delivery_plan(before, plan).route_valid
+    assert simulation.state == before
+    assert plan_delivery(before, "o", "robot-1") == plan
+
+
+@pytest.mark.parametrize("blocked", [Position(x=2, y=0), Position(x=9, y=0)])
+def test_delivery_planning_unreachable_leg(blocked):
+    from app.warehouse import plan_delivery
+
+    simulation = WarehouseSimulation()
+    simulation.create_order("o", "p", Position(x=2, y=0), Position(x=9, y=0))
+    simulation.add_blocked_cell(blocked)
+    before = simulation.state
+    assert plan_delivery(before, "o", "robot-1") is None
+    assert simulation.state == before
+
+
+def test_delivery_planning_rejects_unknown_and_ineligible_selections():
+    from app.warehouse import plan_delivery
+
+    simulation = WarehouseSimulation()
+    simulation.create_order("o", "p", Position(x=2, y=0), Position(x=9, y=0))
+    with pytest.raises(KeyError):
+        plan_delivery(simulation.state, "missing", "robot-1")
+    with pytest.raises(KeyError):
+        plan_delivery(simulation.state, "o", "missing")
+    simulation.assign_order("o", "robot-1")
+    with pytest.raises(ValueError):
+        plan_delivery(simulation.state, "o", "robot-1")
+    simulation.create_order("o2", "p2", Position(x=2, y=0), Position(x=9, y=0))
+    with pytest.raises(ValueError):
+        plan_delivery(simulation.state, "o2", "robot-1")

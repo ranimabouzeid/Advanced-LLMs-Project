@@ -1,6 +1,6 @@
 """Sequential, deterministic warehouse actions. No routing or agent logic."""
 
-from .models import Order, Package, Position, Robot, RobotStatus, WarehouseState
+from .models import Order, OrderStatus, Package, Position, Robot, RobotStatus, WarehouseState
 
 
 class WarehouseSimulation:
@@ -29,6 +29,79 @@ class WarehouseSimulation:
     def state(self) -> WarehouseState:
         return self._state
 
+    def _commit(self, **changes: object) -> None:
+        """Validate one complete action; advance revision only if state changes."""
+        candidate = WarehouseState.model_validate({**self.state.model_dump(), **changes})
+        if candidate == self.state:
+            return
+        self._state = WarehouseState.model_validate({
+            **candidate.model_dump(), "revision": self.state.revision + 1,
+        })
+
+    def get_order(self, order_id: str) -> Order:
+        for order in self.state.orders:
+            if order.id == order_id:
+                return order
+        raise KeyError(f"Unknown order: {order_id}")
+
+    def pending_orders(self) -> tuple[Order, ...]:
+        """Return only unassigned orders, in creation order."""
+        return tuple(order for order in self.state.orders if order.status == OrderStatus.PENDING)
+
+    def _commit_lifecycle(self, order: Order, robot: Robot) -> None:
+        self._commit(
+            orders=tuple(order if item.id == order.id else item for item in self.state.orders),
+            robots=tuple(robot if item.id == robot.id else item for item in self.state.robots),
+        )
+
+    def assign_order(self, order_id: str, robot_id: str) -> Order:
+        """Reserve one pending order for an idle, empty robot. No battery cost."""
+        order, robot = self.get_order(order_id), self.get_robot(robot_id)
+        if order.status != OrderStatus.PENDING:
+            raise ValueError("Only pending orders can be assigned")
+        if robot.status != RobotStatus.IDLE or robot.carried_package_id is not None:
+            raise ValueError("Assignment requires an idle robot with no carried package")
+        assigned = Order.model_validate({
+            **order.model_dump(), "status": OrderStatus.ASSIGNED, "assigned_robot_id": robot.id,
+        })
+        busy = Robot.model_validate({**robot.model_dump(), "status": RobotStatus.BUSY})
+        self._commit_lifecycle(assigned, busy)
+        return assigned
+
+    def pickup_package(self, order_id: str, robot_id: str) -> Order:
+        """Collect the assigned package at its pickup cell. No battery cost."""
+        order, robot = self.get_order(order_id), self.get_robot(robot_id)
+        if order.status != OrderStatus.ASSIGNED:
+            raise ValueError("Pickup requires an assigned order that has not been picked up")
+        if order.assigned_robot_id != robot.id:
+            raise ValueError("Only the assigned robot may pick up this package")
+        if robot.status != RobotStatus.BUSY or robot.carried_package_id is not None:
+            raise ValueError("Pickup requires a busy robot with no carried package")
+        if robot.position != order.package.pickup:
+            raise ValueError("Robot must be at the pickup position")
+        picked_up = Order.model_validate({**order.model_dump(), "status": OrderStatus.PICKED_UP})
+        carrying = Robot.model_validate({**robot.model_dump(), "carried_package_id": order.package.id})
+        self._commit_lifecycle(picked_up, carrying)
+        return picked_up
+
+    def deliver_package(self, order_id: str, robot_id: str) -> Order:
+        """Deliver the carried package at its drop-off and free the robot."""
+        order, robot = self.get_order(order_id), self.get_robot(robot_id)
+        if order.status != OrderStatus.PICKED_UP:
+            raise ValueError("Delivery requires a picked-up order")
+        if order.assigned_robot_id != robot.id:
+            raise ValueError("Only the assigned robot may deliver this package")
+        if robot.status != RobotStatus.BUSY or robot.carried_package_id != order.package.id:
+            raise ValueError("Robot must be busy and carry the matching package")
+        if robot.position != order.dropoff:
+            raise ValueError("Robot must be at the drop-off position")
+        delivered = Order.model_validate({**order.model_dump(), "status": OrderStatus.DELIVERED})
+        idle = Robot.model_validate({
+            **robot.model_dump(), "carried_package_id": None, "status": RobotStatus.IDLE,
+        })
+        self._commit_lifecycle(delivered, idle)
+        return delivered
+
     def robot_positions(self) -> dict[str, Position]:
         """Return a detached mapping of robot IDs to immutable positions."""
         return {robot.id: robot.position for robot in self.state.robots}
@@ -49,10 +122,7 @@ class WarehouseSimulation:
         order = Order(
             id=order_id, package=Package(id=package_id, pickup=pickup), dropoff=dropoff,
         )
-        candidate = WarehouseState.model_validate({
-            **self.state.model_dump(), "orders": (*self.state.orders, order),
-        })
-        self._state = candidate
+        self._commit(orders=(*self.state.orders, order))
         return order
 
     def add_blocked_cell(self, cell: Position) -> None:
@@ -61,19 +131,13 @@ class WarehouseSimulation:
         Pickup and drop-off cells may be temporarily blocked. A robot's current
         cell and permanent obstacles cannot be marked as temporary blocks.
         """
-        candidate = WarehouseState.model_validate({
-            **self.state.model_dump(), "blocked_cells": self.state.blocked_cells | {cell},
-        })
-        self._state = candidate
+        self._commit(blocked_cells=self.state.blocked_cells | {cell})
 
     def remove_blocked_cell(self, cell: Position) -> None:
         """Unblock an in-bounds cell; removing a missing block is a no-op."""
         if not self.state.contains(cell):
             raise ValueError("Cell is outside the grid")
-        candidate = WarehouseState.model_validate({
-            **self.state.model_dump(), "blocked_cells": self.state.blocked_cells - {cell},
-        })
-        self._state = candidate
+        self._commit(blocked_cells=self.state.blocked_cells - {cell})
 
     def move_robot(self, robot_id: str, destination: Position) -> Robot:
         """Move one orthogonal step, consuming one battery percentage point.
@@ -98,12 +162,8 @@ class WarehouseSimulation:
         if robot.battery < 1:
             raise ValueError("Robot battery is depleted")
 
-        moved = Robot(
-            id=robot.id, position=destination, battery=robot.battery - 1, status=robot.status,
-        )
-        candidate = WarehouseState.model_validate({
-            **self.state.model_dump(),
-            "robots": tuple(moved if item.id == robot_id else item for item in self.state.robots),
+        moved = Robot.model_validate({
+            **robot.model_dump(), "position": destination, "battery": robot.battery - 1,
         })
-        self._state = candidate
+        self._commit(robots=tuple(moved if item.id == robot_id else item for item in self.state.robots))
         return moved

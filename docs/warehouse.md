@@ -1,8 +1,9 @@
 # SWARMDOCK warehouse: domain model and deterministic simulation
 
-The current implementation includes domain data, sequential actions, and deterministic
-A* route planning. There is no order execution, charging process, LangGraph,
-LLM agent, HTTP service, or UI.
+The current implementation includes domain data, sequential lifecycle actions,
+deterministic A*, complete two-leg delivery planning, and typed validation.
+Atomic full-delivery execution, charging, LangGraph, LLM agents, HTTP, and UI remain
+outside the implemented scope.
 
 ## Layout and conventions
 
@@ -53,6 +54,11 @@ state. This is a sequential in-memory simulation, not a concurrent execution eng
 | `obstacles()` | Inspect permanent shelf cells |
 | `get_robot(robot_id)` | Inspect position, battery, and status |
 | `create_order(order_id, package_id, pickup, dropoff)` | Add one validated pending order |
+| `get_order(order_id)` | Inspect an order and its lifecycle |
+| `pending_orders()` | Return eligible pending orders in creation order |
+| `assign_order(order_id, robot_id)` | Assign a pending order to an idle robot and mark it busy |
+| `pickup_package(order_id, robot_id)` | Collect the assigned package at its pickup cell |
+| `deliver_package(order_id, robot_id)` | Deliver the carried package at its drop-off and return the robot to idle |
 | `add_blocked_cell(cell)` | Add a temporary block; an existing block is a no-op |
 | `remove_blocked_cell(cell)` | Remove a temporary block; a missing in-bounds block is a no-op |
 | `move_robot(robot_id, destination)` | Apply one validated orthogonal step |
@@ -67,7 +73,51 @@ and this phase does not assign work. Moving does not pick up or deliver packages
 Invalid actions raise `ValueError` (including Pydantic `ValidationError`); unknown
 robot IDs raise `KeyError`. All rejected actions preserve the entire snapshot,
 including battery. A robot may spend its last battery point, then cannot move again.
-Status changes and charging are not yet provided as simulation actions.
+Lifecycle actions change status as documented below. Charging is not implemented.
+
+## Delivery lifecycle and domain invariants
+
+```text
+pending → assigned → picked_up → delivered
+```
+
+- `Order.assigned_robot_id` is `None` for pending orders and required for all later
+  statuses. Delivered orders retain the assigned robot ID as history.
+- `Robot.carried_package_id` is optional and represents at most one carried package.
+  The order status remains the only package lifecycle; `Package.pickup` is the
+  original pickup location, not an independently updated live package position.
+- Assignment requires a pending order and an idle, empty robot. The robot becomes
+  busy. A robot cannot have two active assigned/picked-up orders.
+- Pickup requires the explicitly supplied robot ID to match the assignment,
+  an empty busy robot, and the correct pickup position. It changes the order to
+  picked-up and sets the robot's carried package ID.
+- Delivery requires the assigned busy robot, matching carried package, and correct
+  drop-off position. It clears carrying, returns the robot to idle, and marks the
+  order delivered. That robot may subsequently be assigned another order.
+- Duplicate assignment, pickup, and delivery are rejected. Package IDs remain unique
+  across all orders, including delivered history. Delivered orders never appear in
+  `pending_orders()`.
+- Assignment, pickup, and delivery consume zero battery. A robot with zero battery
+  may perform a zero-movement pickup/drop-off if all other conditions hold.
+- Existing generic busy robots without an active order remain supported for movement.
+  A carried package, however, must correspond to a picked-up order on that robot.
+
+Each primitive validates the combined robot/order snapshot before publication.
+Invalid actions raise `ValueError`; unknown order or robot IDs raise `KeyError`.
+Model-level validation also rejects inconsistent assignment/carrying snapshots.
+
+### Warehouse revision
+
+`WarehouseState.revision` starts at zero. Each successful state-changing primitive
+increments it once. Failed actions, adding an existing block, or removing an absent
+in-bounds block leave it unchanged. Blocking and unblocking restores cell contents
+but advances the revision twice. Constructing a simulation from a snapshot retains
+that snapshot's revision.
+
+Revision identifies changes within the current simulation history. It is not a
+global identifier across unrelated simulations, and it does not add thread/session
+management. Later graph state should use this field rather than maintain a second
+independent warehouse revision.
 
 ## Run locally
 
@@ -167,6 +217,99 @@ endpoints. Breadth-first search exists only in tests; production routing is A*.
 
 ## Next boundary
 
-The original roadmap's domain-model, basic simulation, and A* steps now have
-focused tests. Further validation, pickup/delivery execution, and graph integration
-remain future work and require an explicit request.
+The authorized portion of Milestone A implements lifecycle primitives, delivery
+plans, and validation only. Atomic full-delivery execution remains deferred by the
+latest user instruction. No later milestone has begun.
+
+## Complete delivery planning and typed validation
+
+```python
+plan_delivery(state, order_id, robot_id) -> DeliveryPlan | None
+validate_delivery_plan(state, plan) -> ValidationResult
+validate_route(state, robot_id, expected_start, expected_goal, route, *, leg=None)
+```
+
+`plan_delivery` is a pure helper alongside the unchanged `astar_path`. It plans
+robot-to-pickup and pickup-to-drop-off routes using A* twice, with other robots'
+current positions added to the blocked cells. It does not assign or move a robot.
+Unknown IDs raise `KeyError`; a nonpending order or nonidle robot raises `ValueError`.
+An unreachable leg returns `None`. A reachable plan can exceed available battery;
+the validation result explicitly reports that failure rather than calling it unreachable.
+
+`DeliveryPlan` is a frozen Pydantic model with `order_id`, `robot_id`,
+`pickup_route`, `delivery_route`, `total_steps`, and `warehouse_revision`.
+Route fields are nonempty tuples of `Position` for immutable snapshots. Both legs
+include endpoints. The model enforces:
+
+```text
+total_steps = (len(pickup_route) - 1) + (len(delivery_route) - 1)
+```
+
+One-coordinate legs cost zero steps. Validation independently derives this cost,
+so an understated `total_steps` cannot bypass the battery check. Actual A* route
+lengths account for detours; Manhattan distance alone is insufficient.
+
+`validate_route` checks nonempty input, expected endpoints, bounds, orthogonal
+adjacency (including rejecting repeated stationary steps), shelves, blocked cells,
+other robots, and movement-permitted status. Expected endpoints are explicit so
+the delivery leg starts at pickup even though the robot has not moved there yet.
+
+`validate_delivery_plan` also checks pending-order eligibility, an idle empty robot,
+current revision, and sufficient battery for both legs combined. Complete-plan
+validation is for a fresh proposal before assignment, not resuming a picked-up order.
+
+The frozen `ValidationResult` contains:
+
+- `route_valid`: true only when no reasons or conflicts were found.
+- `collision_risk`: true only when another robot occupies a route cell.
+- `reasons`: typed issues with code, message, optional cell, and optional leg.
+- `conflicts`: typed findings identifying robot ID, cell, and optional leg.
+
+An obstacle, stale revision, or depleted battery makes a plan invalid but does not
+by itself imply a robot conflict. The result model rejects contradictory flags.
+Standalone route validation accepts empty sequences so it can return an explicit
+`empty_route` issue; the delivery-plan model also rejects empty legs at construction.
+
+### Primitive-by-primitive demonstration
+
+From Python launched in `backend/`:
+
+```python
+from app.warehouse import Position, WarehouseSimulation, plan_delivery, validate_delivery_plan
+
+warehouse = WarehouseSimulation()
+warehouse.create_order("order-1", "package-1", Position(x=2, y=0), Position(x=9, y=0))
+plan = plan_delivery(warehouse.state, "order-1", "robot-1")
+assert plan is not None
+assert validate_delivery_plan(warehouse.state, plan).route_valid
+
+warehouse.assign_order(plan.order_id, plan.robot_id)
+for cell in plan.pickup_route[1:]:
+    warehouse.move_robot(plan.robot_id, cell)
+warehouse.pickup_package(plan.order_id, plan.robot_id)
+for cell in plan.delivery_route[1:]:
+    warehouse.move_robot(plan.robot_id, cell)
+warehouse.deliver_package(plan.order_id, plan.robot_id)
+
+assert warehouse.get_order("order-1").status.value == "delivered"
+assert warehouse.get_robot("robot-1").battery == 91  # 2 + 7 moves
+```
+
+This sequence is deliberately not a transaction across the full delivery. If a
+later primitive fails, earlier successful primitives remain committed. Each
+primitive itself remains atomic. No `execute_delivery` method is implemented.
+Assignment changes revision, so the original plan is no longer a fresh pending
+proposal afterward; each explicit movement and lifecycle action still validates
+current state. Full-plan atomic execution and its validation protocol are deferred.
+
+### Compatibility and tests
+
+Existing public signatures, A*, initial layout, and one-point movement costs remain
+unchanged. New fields default to `None` or revision zero, so earlier pending-order
+snapshots can still be loaded. Serialized output gains those fields. Consumers
+comparing complete snapshots must account for revision changes.
+
+The latest full suite contains 148 passing cases: 43 model, 44 simulation, 30
+routing, and 31 validation cases. Coverage includes zero-move delivery, exact
+battery boundaries, obstacle detours, stale plans, repeated lifecycle actions,
+assignment/carrying consistency, and unchanged state after failed primitives.

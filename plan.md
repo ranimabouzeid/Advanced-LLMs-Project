@@ -77,6 +77,11 @@ authentication, rush mode, and elaborate animation.
 
 ## 3. Milestone A — Delivery lifecycle and deterministic validation
 
+**Implementation status:** Lifecycle primitives, typed two-leg delivery plans,
+revision tracking, and deterministic validation are implemented and tested (148
+total cases). The latest user instruction explicitly defers atomic full-delivery
+execution. The atomic policy below remains proposed work, not completed behavior.
+
 **Owners:** Person 2 leads; Person 4 helps with tests and demonstration fixtures.
 **Dependency:** existing simulation and routing. Complete before agent integration.
 
@@ -157,6 +162,10 @@ Use a Pydantic graph state containing `warehouse: WarehouseState`. This immutabl
 snapshot, stored with graph checkpoints, is the authoritative domain state for
 that session. Do not keep another mutable global simulation beside the graph.
 
+`WarehouseState.revision` now owns the warehouse revision. Future graph state must
+read it from the snapshot rather than introduce an independently updated duplicate.
+Domain primitives increment it on real changes; failed/no-op actions leave it unchanged.
+
 Deterministic execution creates a temporary simulation from this snapshot and
 returns a new snapshot as a partial graph update. Order creation and blocked-cell
 changes likewise use existing validated domain actions, coordinated by the session
@@ -167,7 +176,7 @@ ask the LLM to supply or invent authoritative `warehouse_json`.
 
 | Field group | Contents |
 | --- | --- |
-| Warehouse | Snapshot and nonnegative `warehouse_revision` |
+| Warehouse | Snapshot including its nonnegative `revision` |
 | Command | Typed command/event and whether execution was requested |
 | Selection | Optional structured order selection and selected robot ID |
 | Plan | Optional two-leg plan and explicit planning outcome |

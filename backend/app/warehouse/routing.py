@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from heapq import heappop, heappush
 from itertools import count
 
-from .models import Position
+from .models import DeliveryPlan, OrderStatus, Position, RobotStatus, WarehouseState
 
 
 def astar_path(
@@ -71,3 +71,39 @@ def astar_path(
             heappush(frontier, (new_cost + heuristic(neighbor), next(sequence), new_cost, neighbor))
 
     return None
+
+
+def plan_delivery(state: WarehouseState, order_id: str, robot_id: str) -> DeliveryPlan | None:
+    """Plan both legs for a pending order and idle robot without changing state.
+
+    None means at least one leg is unreachable. Unknown IDs raise KeyError;
+    ineligible orders/robots raise ValueError. A reachable plan can exceed the
+    robot's battery: validate_delivery_plan reports complete-delivery feasibility.
+    Other robots' current positions are treated as static blocked cells.
+    """
+    order = next((item for item in state.orders if item.id == order_id), None)
+    robot = next((item for item in state.robots if item.id == robot_id), None)
+    if order is None:
+        raise KeyError(f"Unknown order: {order_id}")
+    if robot is None:
+        raise KeyError(f"Unknown robot: {robot_id}")
+    if order.status != OrderStatus.PENDING:
+        raise ValueError("Complete delivery planning requires a pending order")
+    if robot.status != RobotStatus.IDLE or robot.carried_package_id is not None:
+        raise ValueError("Complete delivery planning requires an idle, empty robot")
+
+    blocked = state.blocked_cells | {item.position for item in state.robots if item.id != robot_id}
+    pickup_route = astar_path(state.width, state.height, robot.position, order.package.pickup,
+                              state.obstacles, blocked)
+    if pickup_route is None:
+        return None
+    delivery_route = astar_path(state.width, state.height, order.package.pickup, order.dropoff,
+                                state.obstacles, blocked)
+    if delivery_route is None:
+        return None
+    return DeliveryPlan(
+        order_id=order.id, robot_id=robot.id,
+        pickup_route=tuple(pickup_route), delivery_route=tuple(delivery_route),
+        total_steps=len(pickup_route) + len(delivery_route) - 2,
+        warehouse_revision=state.revision,
+    )
