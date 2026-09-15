@@ -6,6 +6,27 @@ This repository is for a university course project: an autonomous multi-agent wa
 
 The project is intentionally structured in phases. The application is not to be implemented in full at this stage. This file defines the target architecture, operating rules, and the required development sequence.
 
+### Current Status and Authorization Boundary
+
+- Phase 1 (repository/environment setup) is complete. The local Windows virtual environment `.venv` uses Python 3.11.9.
+- All seven requested dependencies are installed and import successfully; `pip check` reports no broken requirements.
+- No warehouse models, simulation, routing, graph agents, API, or React application have been implemented.
+- The current task is documentation only. Phase 2 requires an explicit user request.
+- Future architecture and file examples below are design requirements, not authorization to create the whole application.
+- Update this status only when a phase has actually been completed and verified.
+
+Current project files, excluding Git internals and the ignored `.venv`:
+
+```text
+AGENTS.md
+README.md
+.gitignore
+backend/requirements.txt
+frontend/.gitkeep
+docs/environment.md
+docs/phase-1-command-log.md
+```
+
 ## Final System Architecture
 
 React frontend
@@ -38,6 +59,14 @@ Deterministic Python tools and warehouse simulation
 - Includes robots, orders, blocked cells, routes, and validation rules.
 - All routing and decision support tools must be deterministic and testable.
 
+### Layer Boundaries
+
+- Domain models, simulation, routing, and validation must work without an LLM, graph, or HTTP server.
+- Graph tools wrap deterministic domain functions; API handlers later invoke orchestration.
+- Domain code must not import the API or graph to perform warehouse operations.
+- React later consumes the API; keep simulation rules out of UI components.
+- Installing FastAPI and LangGraph during setup does not authorize their implementation.
+
 ## Required Agent Roles
 
 ### Order Agent
@@ -62,6 +91,38 @@ Deterministic Python tools and warehouse simulation
 - Writes route_valid and collision_risk into shared state.
 - Must be the component that triggers the conditional routing logic.
 
+### Agent Contracts and Tool Ownership
+
+Implement all four roles even though the course minimum is three. Each role needs a distinct toolset and explicit state ownership. The following field names are proposed contracts to finalize in Phase 6.
+
+| Agent | State inputs | Partial updates it owns | Tools |
+| --- | --- | --- | --- |
+| Order | Pending orders and metadata | Selected order identifier and selection reason | Pending-order and order-metadata lookup |
+| Fleet | Selected order, robot positions and availability | Selected robot identifier and assignment reason | Robot-status and deterministic distance/reachability checks |
+| Route | Selected robot, target, obstacles, blocked cells, safety feedback | Proposed route, planning status, replan attempt count | Deterministic A* |
+| Safety | Proposed route, warehouse snapshot, other robot positions/routes | `route_valid`, `collision_risk`, rejection reasons and conflict details | Route validation and robot-conflict detection |
+
+- Order must later use a dedicated Pydantic structured output model and validate that a selected identifier refers to an eligible pending order. It must not assign robots or move them.
+- Fleet must use documented selection and tie-break rules. It must not invent distances, execute movement, or mark orders complete.
+- Route must distinguish an unreachable target from a valid start-equals-goal route. It must not certify its own route as safe.
+- Safety must derive its results from runtime checks rather than assume that an A* result is safe.
+- No pending order, no available robot, and no reachable route must be separate, explicit outcomes.
+
+### Intended Conditional Workflow
+
+```text
+Order → Fleet → Route → Safety
+                         ├── valid and no collision risk → deterministic execution
+                         └── invalid or collision risk → Route with safety feedback
+```
+
+- The LangGraph conditional edge reads the Safety Agent's state updates.
+- Execution is a deterministic operation, not another LLM agent. Never execute a rejected route.
+- Revalidate against the relevant current simulation state before committing movement.
+- Replanning must consume actionable feedback; repeatedly requesting the same route with unchanged inputs is not recovery.
+- Bound replanning attempts and terminate with an explicit failure when exhausted. Handle missing work/resources before attempting route execution.
+- Do not add advanced scheduling or time-expanded routing without first documenting and authorizing that additional scope.
+
 ## Required LangGraph Features
 
 The final implementation must include:
@@ -75,6 +136,19 @@ The final implementation must include:
 - at least one agent using Pydantic Structured Output Mode
 - at least one conditional edge
 
+### Shared State Rules
+
+- Agents communicate through shared LangGraph state, not direct agent-to-agent messages, hidden module globals, or undocumented side effects.
+- Use a Pydantic `BaseModel` with identifiers/strings, integer counters, booleans, collections, and nested domain models as appropriate.
+- Include optional fields for values not yet known, such as selected order, selected robot, route, and safety results.
+- Keep an unknown safety result distinct from a checked invalid route.
+- Return meaningful partial updates and preserve unrelated state fields.
+- Clear stale routes and safety results when their inputs change.
+- Validate structured model output before making it actionable.
+- Define the warehouse snapshot/reference strategy explicitly; avoid two independent sources of truth for robot positions or order status.
+- Add `MemorySaver` only in Phase 9, with explicit thread identifiers and checks for thread isolation. Verify the installed LangGraph API then.
+- In-memory checkpointing is sufficient initially; it does not imply persistence across process restarts or require a database.
+
 ## Required Warehouse Model
 
 The warehouse will initially be a simple 10x10 logical grid with:
@@ -85,6 +159,29 @@ The warehouse will initially be a simple 10x10 logical grid with:
 - delivery / drop-off locations
 - A* routing
 - collision and route validation
+
+### Conventions to Define Before Implementing Behavior
+
+- Coordinate order, bounds, and indexing; prefer zero-based coordinates for the initial grid.
+- Movement directions and costs; prefer four orthogonal neighbors with unit cost.
+- Permanent shelf obstacles versus temporary blocked cells.
+- Robot availability and order/package lifecycle states.
+- Whether pickup and delivery are separate route legs and how targets are chosen.
+- Route representation, including whether it contains the start and destination.
+- Sequential execution versus discrete simulation ticks.
+- Collision rules appropriate to execution: occupied cells and, if concurrent motion is supported, same-cell conflicts and robots swapping cells in one tick.
+
+These are design decisions to document in the relevant phase, not tasks to implement now.
+
+### Determinism and Safety
+
+- A* must perform routing. Document the heuristic, neighbor ordering, and tie-breaking behavior.
+- Never substitute LLM reasoning or another algorithm for required A* routing.
+- `networkx` is available but optional; any use must preserve the documented A* behavior.
+- Validate bounds, allowed moves, obstacles, blocked cells, endpoints, and robot conflicts.
+- Failed movement must not partially update positions or complete an order.
+- Use fixed fixtures and stable ordering. If randomness becomes necessary, use an explicit seed.
+- LLM selections may vary, but domain rules, routing, and safety checks must be deterministic for fixed inputs.
 
 ## Project Rules
 
@@ -107,30 +204,29 @@ The warehouse will initially be a simple 10x10 logical grid with:
 
 ## Recommended Initial Repository Structure
 
-The repository should evolve in this order:
+Keep future Python code under the existing `backend/` directory. Avoid competing warehouse packages at both the root and under backend. Create only the files needed by an explicitly requested phase.
 
 ```text
 Advanced-LLMs-Project/
 ├── README.md
 ├── AGENTS.md
 ├── .gitignore
-├── requirements.txt
-├── pyproject.toml
 ├── pytest.ini
-├── src/
-│   └── warehouse/
-│       ├── __init__.py
-│       ├── models.py
-│       ├── simulation.py
-│       ├── routing.py
-│       ├── validation.py
-│       └── tools.py
-├── tests/
-│   ├── test_simulation.py
-│   ├── test_routing.py
-│   └── test_validation.py
-├── app/
+├── backend/
+│   ├── requirements.txt
+│   ├── warehouse/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── simulation.py
+│   │   ├── routing.py
+│   │   └── validation.py
+│   ├── tests/
+│   │   ├── test_models.py
+│   │   ├── test_simulation.py
+│   │   ├── test_routing.py
+│   │   └── test_validation.py
 │   ├── graph/
+│   │   ├── __init__.py
 │   │   ├── state.py
 │   │   ├── agents.py
 │   │   ├── tools.py
@@ -140,10 +236,14 @@ Advanced-LLMs-Project/
 ├── frontend/
 │   └── package.json
 └── docs/
+    ├── environment.md
+    ├── phase-1-command-log.md
     └── architecture.md
 ```
 
 This structure is a recommendation for the final project shape. The current implementation phase does not require creating these directories yet.
+
+`warehouse/` owns deterministic domain code. `graph/tools.py` contains role-specific wrappers for those functions. `graph/agents.py` can initially contain four separate node functions; split files only when useful. `api/main.py` and `frontend/package.json` belong to Phases 10 and 11. Finalize package imports when source is first added, and add packaging metadata only if needed.
 
 ## Development Order
 
@@ -159,12 +259,59 @@ This structure is a recommendation for the final project shape. The current impl
 10. FastAPI
 11. React frontend
 
+### Phase Completion Criteria
+
+| Phase | Evidence before calling it complete |
+| --- | --- |
+| 1. Environment | Python 3.11 environment and imports verified, `pip check` succeeds, `.venv` ignored |
+| 2. Data model | Minimal Pydantic models, documented conventions, valid examples and invalid-input checks |
+| 3. Simulation | Repeatable initialization/transitions; invalid actions leave state consistent |
+| 4. A* | Known routes, blocked/unreachable targets, boundaries, and start-equals-goal behavior verified |
+| 5. Tests | Offline deterministic test suite passes using repository-local pytest configuration |
+| 6. State | Pydantic validation, optional fields, and partial-update behavior verified |
+| 7. Agents | Four role contracts, distinct tools, structured Order output, and basic graph wiring checked with mocked model responses |
+| 8. Conditional routing | Safe/unsafe branches and bounded replanning failure verified |
+| 9. MemorySaver | Checkpoint retrieval and thread isolation verified |
+| 10. FastAPI | Thin service layer and endpoint behavior tested against established orchestration |
+| 11. React | Core display and interaction flows verified against the established API |
+
+Write focused tests alongside deterministic components in Phases 2–4. Phase 5 consolidates coverage rather than postponing all verification. Passing a phase does not authorize starting the next one.
+
+## Local Development and Verification
+
+- Follow `docs/environment.md` for Windows and VS Code instructions.
+- Use `.venv\Scripts\python.exe` explicitly when the terminal is not activated; plain `python` may use a different global installation.
+- Keep `.venv`, caches, and `.env` secrets ignored. Never commit API keys.
+- `backend/requirements.txt` contains `langgraph`, `langchain`, `pydantic`, `fastapi[standard]`, `python-dotenv`, `networkx`, and `pytest`.
+- Versions are currently unpinned. Do not describe the environment as locked or fully reproducible; add constraints only with a concrete reason.
+- Deterministic tests must not require live LLM calls or credentials. Mock model responses when testing agent contracts.
+
+Basic checks from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pytest --rootdir=. -p no:cacheprovider
+git status --short
+```
+
+Currently pytest collects zero tests (exit code 5). That is expected for an empty suite, not evidence of passing application tests. It discovers a parent-directory `pyproject.toml`; the command above sets the repository root and avoids cache writes but does not isolate configuration discovery. Add repository-local pytest configuration when setting up tests, without editing unrelated parent files.
+
+For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
+
 ## Execution Constraints for This Repository
 
-- The current phase is documentation and planning only.
+- The current task is documentation and planning only; environment setup is already complete.
 - No application code should be added before the environment and architecture are documented and understood.
 - Future code should follow the above sequence and keep each phase minimal and verifiable.
 - Any implementation must preserve the agent-role boundaries and shared-state design described above.
+- Inspect existing files and Git status first; preserve unrelated user changes.
+- Prefer small, readable functions and explicit Pydantic models over unnecessary abstractions.
+- Do not add databases, queues, containers, deployment pipelines, or additional services without a concrete requirement and explicit scope.
+- Explain every changed file, why it changed, verification results, and remaining limits.
+- Update environment and architecture documentation when their decisions change.
+- Commit and push when requested, keeping generated environments and secrets out of Git.
+- Stop at the authorized phase boundary and describe the next phase without beginning it.
 
 ## Summary
 
