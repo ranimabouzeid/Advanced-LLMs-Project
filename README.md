@@ -5,7 +5,8 @@ using LangGraph.
 The current implementation contains Pydantic domain models and a deterministic
 10x10 warehouse simulation with three robots, orders, shelves, temporary blocked
 cells, validated single-step movement, reusable deterministic A* route planning,
-assignment/pickup/delivery primitives, and typed two-leg delivery validation.
+assignment/pickup/delivery primitives, typed two-leg delivery validation, and atomic
+complete-delivery execution.
 
 ## Run tests (Windows)
 
@@ -19,6 +20,6 @@ and [architecture and phase boundaries](AGENTS.md).
 See the [revised completion plan](plan.md) for the remaining delivery lifecycle,
 LangGraph, API, frontend, and verification milestones.
 
-The test suite includes 148 cases for models, simulation, routing, and validation.
-Atomic full-delivery execution is deferred. LangGraph agents, FastAPI, and React
+The test suite includes 169 cases for models, simulation, routing, validation, and
+atomic execution. Milestone A is complete. LangGraph agents, FastAPI, and React
 are future phases.

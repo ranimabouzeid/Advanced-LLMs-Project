@@ -1,8 +1,8 @@
 # SWARMDOCK warehouse: domain model and deterministic simulation
 
 The current implementation includes domain data, sequential lifecycle actions,
-deterministic A*, complete two-leg delivery planning, and typed validation.
-Atomic full-delivery execution, charging, LangGraph, LLM agents, HTTP, and UI remain
+deterministic A*, complete two-leg delivery planning, typed validation, and atomic
+complete-delivery execution. Charging, LangGraph, LLM agents, HTTP, and UI remain
 outside the implemented scope.
 
 ## Layout and conventions
@@ -59,6 +59,7 @@ state. This is a sequential in-memory simulation, not a concurrent execution eng
 | `assign_order(order_id, robot_id)` | Assign a pending order to an idle robot and mark it busy |
 | `pickup_package(order_id, robot_id)` | Collect the assigned package at its pickup cell |
 | `deliver_package(order_id, robot_id)` | Deliver the carried package at its drop-off and return the robot to idle |
+| `execute_delivery(plan)` | Validate and execute the full delivery atomically; return a typed result |
 | `add_blocked_cell(cell)` | Add a temporary block; an existing block is a no-op |
 | `remove_blocked_cell(cell)` | Remove a temporary block; a missing in-bounds block is a no-op |
 | `move_robot(robot_id, destination)` | Apply one validated orthogonal step |
@@ -217,9 +218,9 @@ endpoints. Breadth-first search exists only in tests; production routing is A*.
 
 ## Next boundary
 
-The authorized portion of Milestone A implements lifecycle primitives, delivery
-plans, and validation only. Atomic full-delivery execution remains deferred by the
-latest user instruction. No later milestone has begun.
+Milestone A now includes lifecycle primitives, delivery plans, typed validation,
+and atomic complete-delivery execution. Milestone B and all later milestones remain
+unstarted and require an explicit user request.
 
 ## Complete delivery planning and typed validation
 
@@ -297,10 +298,78 @@ assert warehouse.get_robot("robot-1").battery == 91  # 2 + 7 moves
 
 This sequence is deliberately not a transaction across the full delivery. If a
 later primitive fails, earlier successful primitives remain committed. Each
-primitive itself remains atomic. No `execute_delivery` method is implemented.
+primitive itself remains atomic. Use `execute_delivery` below when the entire
+delivery must succeed or fail together.
 Assignment changes revision, so the original plan is no longer a fresh pending
 proposal afterward; each explicit movement and lifecycle action still validates
-current state. Full-plan atomic execution and its validation protocol are deferred.
+current state. The atomic method validates the original proposal once before
+assignment, then validates each transition on its private temporary simulation.
+
+## Atomic complete-delivery execution
+
+```python
+result = warehouse.execute_delivery(plan)
+if result.success:
+    assert result.final_state is warehouse.state
+    print("Committed movement steps:", result.committed_steps)
+else:
+    print(result.failed_stage, result.error)
+    # result.final_state is None; warehouse.state is the unchanged original snapshot.
+```
+
+The method starts from the current immutable snapshot and creates a temporary
+instance with `WarehouseSimulation(snapshot)`. This reuses the same simulation
+class, reconstructs/validates its records, and preserves the starting revision.
+No global simulation or second domain implementation is introduced.
+
+Execution proceeds entirely inside that temporary instance:
+
+1. Validate the complete plan against the starting snapshot, including revision,
+   order/robot eligibility, geometry, conflicts, and battery for both legs.
+2. Assign the order using `assign_order`.
+3. Move through `pickup_route[1:]` using `move_robot` for every step.
+4. Call `pickup_package`.
+5. Move through `delivery_route[1:]` using `move_robot` for every step.
+6. Call `deliver_package`.
+7. Verify the final delivered order, robot position/status, empty carrying field,
+   executed step count, and exact battery consumption; validate the final snapshot.
+8. Construct a successful result, then publish the snapshot by replacing the
+   original simulation's state once.
+
+The published revision is the original revision plus one, because the complete
+delivery is one externally visible action. Temporary per-primitive revisions are
+private. Previously obtained immutable snapshots remain unchanged even on success.
+
+If validation fails or an ordinary exception occurs at any later stage, execution
+returns a typed failure and discards temporary work. It never publishes intermediate
+positions, package ownership, battery changes, or revisions. Rollback requires no
+reverse movements: the original snapshot was never modified. Process interrupts
+propagate rather than being converted to results, but temporary state still is not
+published. This is a sequential in-memory operation, not a concurrent transaction
+or persistence mechanism.
+
+`DeliveryExecutionResult` is a frozen Pydantic model exported from `app.warehouse`:
+
+| Field | Meaning |
+| --- | --- |
+| `success` | Whether the whole delivery was committed |
+| `final_state` | Published warehouse snapshot on success; `None` on failure |
+| `committed_steps` | Published movement count; zero on failure |
+| `validation` | Initial complete-plan findings, if validation completed |
+| `failed_stage` | Initialization, validation, assignment, pickup route, pickup, delivery route, delivery, or finalization |
+| `error` | Error description on failure; `None` on success |
+
+An initially valid plan can still fail during a later transition; in that case
+`validation.route_valid` remains true but `success` is false. The result never
+exposes the partially executed temporary warehouse. Result validation rejects
+failures containing a final snapshot or committed movement.
+
+Battery cost is exactly `(len(pickup_route) - 1) + (len(delivery_route) - 1)` on
+success. Each step uses the existing one-point movement rule. Assignment, pickup,
+and delivery cost zero. The pickup junction is not charged twice, and a one-cell
+leg performs no movement. An entirely zero-step delivery can succeed with zero
+battery. Re-executing an already delivered order returns a validation failure
+without changing the completed warehouse.
 
 ### Compatibility and tests
 
@@ -309,7 +378,11 @@ unchanged. New fields default to `None` or revision zero, so earlier pending-ord
 snapshots can still be loaded. Serialized output gains those fields. Consumers
 comparing complete snapshots must account for revision changes.
 
-The latest full suite contains 148 passing cases: 43 model, 44 simulation, 30
-routing, and 31 validation cases. Coverage includes zero-move delivery, exact
+The latest full suite contains 169 passing cases: 43 model, 44 simulation, 30
+routing, 31 validation, and 21 atomic execution cases. Coverage includes zero-move delivery, exact
 battery boundaries, obstacle detours, stale plans, repeated lifecycle actions,
 assignment/carrying consistency, and unchanged state after failed primitives.
+Atomic execution tests inject failures after real temporary movement, pickup, and
+even completed delivery, and verify that the original snapshot remains identical.
+They also cover newly blocked routes, stale plans, repeated execution, and preservation
+of unrelated orders and robots.

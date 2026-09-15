@@ -77,10 +77,10 @@ authentication, rush mode, and elaborate animation.
 
 ## 3. Milestone A — Delivery lifecycle and deterministic validation
 
-**Implementation status:** Lifecycle primitives, typed two-leg delivery plans,
-revision tracking, and deterministic validation are implemented and tested (148
-total cases). The latest user instruction explicitly defers atomic full-delivery
-execution. The atomic policy below remains proposed work, not completed behavior.
+**Implementation status:** Milestone A is complete. Lifecycle primitives, typed
+two-leg delivery plans, revision tracking, deterministic validation, and atomic
+complete-delivery execution are implemented. The full suite has 169 passing cases,
+including 21 atomic execution cases. Milestone B has not begun.
 
 **Owners:** Person 2 leads; Person 4 helps with tests and demonstration fixtures.
 **Dependency:** existing simulation and routing. Complete before agent integration.
@@ -148,6 +148,11 @@ when all steps, pickup, and delivery succeed. On failure publish no warehouse ch
 This extends current per-action atomicity to the whole delivery and avoids a
 half-moved robot or a falsely completed order. Intermediate motion is not live UI
 state in the minimum demo. A later animation can replay recorded steps explicitly.
+
+Implemented interface: `WarehouseSimulation.execute_delivery(plan)` returns a typed
+`DeliveryExecutionResult`. Success publishes one final snapshot with revision +1;
+failure returns stage/error details, no final snapshot, and zero committed steps.
+All temporary movements use the existing `move_robot` checks.
 
 **Done when:** lifecycle tests, route validation tests, two-leg delivery, zero-step
 legs, insufficient battery, and failed-delivery rollback all pass offline.
@@ -509,5 +514,5 @@ Keep `.venv`, `.env`, Python caches, frontend dependencies, and build output ign
 update `.gitignore` when the frontend is introduced.
 
 This plan adds no application code and does not change the Downloads source file.
-The next implementation request should authorize Milestone A: delivery lifecycle
-and complete deterministic route validation, before moving into LangGraph.
+Milestone A has subsequently been implemented and verified. The next proposed
+milestone is B; it requires explicit authorization before implementation begins.

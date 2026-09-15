@@ -2,8 +2,9 @@
 
 > This presentation records the foundation and A* phase (85 tests at that time).
 > Subsequent work added lifecycle primitives, complete delivery planning, and typed
-> validation, bringing the suite to 148 tests. See [current warehouse documentation](warehouse.md)
-> for those additions. Atomic full-delivery execution remains deferred.
+> validation, and atomic delivery execution, bringing the suite to 169 tests.
+> See [current warehouse documentation](warehouse.md) for those additions.
+> Milestone A is complete; graph and application layers remain future work.
 
 ## 1. Project introduction
 

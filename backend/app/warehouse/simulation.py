@@ -1,6 +1,45 @@
 """Sequential, deterministic warehouse actions. No routing or agent logic."""
 
-from .models import Order, OrderStatus, Package, Position, Robot, RobotStatus, WarehouseState
+from typing import Literal, Self
+
+from pydantic import Field, model_validator
+
+from .models import DeliveryPlan, DomainModel, Order, OrderStatus, Package, Position, Robot, RobotStatus, WarehouseState
+from .validation import ValidationResult, validate_delivery_plan
+
+
+ExecutionStage = Literal[
+    "initialization", "validation", "assignment", "pickup_route", "pickup",
+    "delivery_route", "delivery", "finalization",
+]
+
+
+class DeliveryExecutionResult(DomainModel):
+    """An atomic outcome. Failed results never expose temporary warehouse state.
+
+    committed_steps counts published movement only, so it is zero on failure
+    even if some movements succeeded in the discarded temporary simulation.
+    """
+
+    success: bool
+    final_state: WarehouseState | None = None
+    committed_steps: int = Field(default=0, ge=0, strict=True)
+    validation: ValidationResult | None = None
+    failed_stage: ExecutionStage | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if self.success:
+            if self.final_state is None or self.failed_stage is not None or self.error is not None:
+                raise ValueError("Success requires a final snapshot and no failure fields")
+            if self.validation is None or not self.validation.route_valid:
+                raise ValueError("Success requires an approved delivery plan")
+        elif self.final_state is not None or self.committed_steps != 0:
+            raise ValueError("Failure cannot publish state or committed movement")
+        elif self.failed_stage is None or not self.error:
+            raise ValueError("Failure requires a stage and error description")
+        return self
 
 
 class WarehouseSimulation:
@@ -28,6 +67,73 @@ class WarehouseSimulation:
     @property
     def state(self) -> WarehouseState:
         return self._state
+
+    def execute_delivery(self, plan: DeliveryPlan) -> DeliveryExecutionResult:
+        """Validate and execute a pending-order delivery as one atomic action.
+
+        All work happens in a temporary instance of this existing simulation.
+        Only a fully successful final snapshot replaces self._state, advancing
+        the original revision once. Ordinary exceptions become typed failures;
+        process interrupts still propagate without publishing temporary changes.
+        This remains a synchronous, sequential simulation, not a concurrency API.
+        """
+        snapshot = self.state
+        stage: ExecutionStage = "initialization"
+        validation: ValidationResult | None = None
+        try:
+            temporary = WarehouseSimulation(snapshot)
+            stage = "validation"
+            validation = validate_delivery_plan(temporary.state, plan)
+            if not validation.route_valid:
+                return DeliveryExecutionResult(
+                    success=False, validation=validation, failed_stage=stage,
+                    error="Complete delivery plan failed validation",
+                )
+
+            initial_battery = temporary.get_robot(plan.robot_id).battery
+            stage = "assignment"
+            temporary.assign_order(plan.order_id, plan.robot_id)
+            steps = 0
+            stage = "pickup_route"
+            for cell in plan.pickup_route[1:]:
+                temporary.move_robot(plan.robot_id, cell)
+                steps += 1
+            stage = "pickup"
+            temporary.pickup_package(plan.order_id, plan.robot_id)
+            stage = "delivery_route"
+            for cell in plan.delivery_route[1:]:
+                temporary.move_robot(plan.robot_id, cell)
+                steps += 1
+            stage = "delivery"
+            temporary.deliver_package(plan.order_id, plan.robot_id)
+
+            stage = "finalization"
+            order = temporary.get_order(plan.order_id)
+            robot = temporary.get_robot(plan.robot_id)
+            if (order.status != OrderStatus.DELIVERED or order.assigned_robot_id != robot.id
+                    or robot.position != order.dropoff or robot.status != RobotStatus.IDLE
+                    or robot.carried_package_id is not None):
+                raise ValueError("Delivery did not reach the required final state")
+            if steps != plan.total_steps or robot.battery != initial_battery - steps:
+                raise ValueError("Executed movement or battery cost does not match the plan")
+
+            # Internal primitive revisions are private. Publish one atomic change.
+            final_state = WarehouseState.model_validate({
+                **temporary.state.model_dump(), "revision": snapshot.revision + 1,
+            })
+            result = DeliveryExecutionResult(
+                success=True, final_state=final_state, committed_steps=steps, validation=validation,
+            )
+        except Exception as error:
+            # This is the transaction boundary: even a late failure discards all
+            # temporary work. No error path assigns to the original self._state.
+            return DeliveryExecutionResult(
+                success=False, validation=validation, failed_stage=stage,
+                error=f"{type(error).__name__}: {error}",
+            )
+
+        self._state = final_state
+        return result
 
     def _commit(self, **changes: object) -> None:
         """Validate one complete action; advance revision only if state changes."""
