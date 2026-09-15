@@ -15,5 +15,8 @@ cells, validated single-step movement, and reusable deterministic A* route plann
 See [environment setup](docs/environment.md), [warehouse conventions and usage](docs/warehouse.md),
 and [architecture and phase boundaries](AGENTS.md).
 
+See the [revised completion plan](plan.md) for the remaining delivery lifecycle,
+LangGraph, API, frontend, and verification milestones.
+
 The test suite includes 85 cases for models, simulation, and routing. LangGraph
 agents, FastAPI, and React are future phases.
