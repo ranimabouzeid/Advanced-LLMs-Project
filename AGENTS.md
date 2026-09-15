@@ -10,8 +10,9 @@ The project is intentionally structured in phases. The application is not to be 
 
 - Phase 1 (repository/environment setup) is complete. The local Windows virtual environment `.venv` uses Python 3.11.9.
 - All seven requested dependencies are installed and import successfully; `pip check` reports no broken requirements.
-- No warehouse models, simulation, routing, graph agents, API, or React application have been implemented.
-- The current task is documentation only. Phase 2 requires an explicit user request.
+- The user-authorized Phase 2 combines warehouse domain models and basic deterministic simulation, originally roadmap steps 2 and 3. Both are implemented under `backend/app/warehouse/` with 59 passing tests.
+- The simulation supports initialization, inspection, pending orders, blocked-cell changes, and validated adjacent movement. See `docs/warehouse.md` for conventions.
+- No pathfinding, graph agents, API, or React application have been implemented. Further implementation requires an explicit user request.
 - Future architecture and file examples below are design requirements, not authorization to create the whole application.
 - Update this status only when a phase has actually been completed and verified.
 
@@ -22,9 +23,17 @@ AGENTS.md
 README.md
 .gitignore
 backend/requirements.txt
+backend/app/__init__.py
+backend/app/warehouse/__init__.py
+backend/app/warehouse/models.py
+backend/app/warehouse/simulation.py
+backend/tests/test_models.py
+backend/tests/test_simulation.py
+pytest.ini
 frontend/.gitkeep
 docs/environment.md
 docs/phase-1-command-log.md
+docs/warehouse.md
 ```
 
 ## Final System Architecture
@@ -204,7 +213,7 @@ These are design decisions to document in the relevant phase, not tasks to imple
 
 ## Recommended Initial Repository Structure
 
-Keep future Python code under the existing `backend/` directory. Avoid competing warehouse packages at both the root and under backend. Create only the files needed by an explicitly requested phase.
+Keep production Python code under `backend/app/`, as explicitly requested for Phase 2, and tests under `backend/tests/`. Avoid competing warehouse packages at the repository root or directly under backend. Create only the files needed by an explicitly requested phase.
 
 ```text
 Advanced-LLMs-Project/
@@ -214,36 +223,39 @@ Advanced-LLMs-Project/
 ├── pytest.ini
 ├── backend/
 │   ├── requirements.txt
-│   ├── warehouse/
+│   ├── app/
 │   │   ├── __init__.py
-│   │   ├── models.py
-│   │   ├── simulation.py
-│   │   ├── routing.py
-│   │   └── validation.py
-│   ├── tests/
-│   │   ├── test_models.py
-│   │   ├── test_simulation.py
-│   │   ├── test_routing.py
-│   │   └── test_validation.py
-│   ├── graph/
-│   │   ├── __init__.py
-│   │   ├── state.py
-│   │   ├── agents.py
-│   │   ├── tools.py
-│   │   └── graph.py
-│   └── api/
-│       └── main.py
+│   │   ├── warehouse/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── simulation.py
+│   │   │   ├── routing.py
+│   │   │   └── validation.py
+│   │   ├── graph/
+│   │   │   ├── __init__.py
+│   │   │   ├── state.py
+│   │   │   ├── agents.py
+│   │   │   ├── tools.py
+│   │   │   └── graph.py
+│   │   └── api/
+│   │       └── main.py
+│   └── tests/
+│       ├── test_models.py
+│       ├── test_simulation.py
+│       ├── test_routing.py
+│       └── test_validation.py
 ├── frontend/
 │   └── package.json
 └── docs/
     ├── environment.md
     ├── phase-1-command-log.md
+    ├── warehouse.md
     └── architecture.md
 ```
 
-This structure is a recommendation for the final project shape. The current implementation phase does not require creating these directories yet.
+This structure includes future components. Only the files listed in Current Status exist; do not scaffold future components yet.
 
-`warehouse/` owns deterministic domain code. `graph/tools.py` contains role-specific wrappers for those functions. `graph/agents.py` can initially contain four separate node functions; split files only when useful. `api/main.py` and `frontend/package.json` belong to Phases 10 and 11. Finalize package imports when source is first added, and add packaging metadata only if needed.
+`app/warehouse/` owns deterministic domain code. Future `app/graph/tools.py` will contain role-specific wrappers for those functions. `app/graph/agents.py` can initially contain four separate node functions; split files only when useful. `app/api/main.py` and `frontend/package.json` belong to Phases 10 and 11. Imports use `app.warehouse` with `backend` on the Python path, configured for tests in `pytest.ini`. Add packaging metadata only if needed.
 
 ## Development Order
 
@@ -291,17 +303,17 @@ Basic checks from the repository root:
 ```powershell
 .\.venv\Scripts\python.exe --version
 .\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pytest --rootdir=. -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest
 git status --short
 ```
 
-Currently pytest collects zero tests (exit code 5). That is expected for an empty suite, not evidence of passing application tests. It discovers a parent-directory `pyproject.toml`; the command above sets the repository root and avoids cache writes but does not isolate configuration discovery. Add repository-local pytest configuration when setting up tests, without editing unrelated parent files.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 59 passing deterministic cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 
 ## Execution Constraints for This Repository
 
-- The current task is documentation and planning only; environment setup is already complete.
+- Environment setup and the requested domain model/basic simulation are complete. Do not implement later phases without an explicit request.
 - No application code should be added before the environment and architecture are documented and understood.
 - Future code should follow the above sequence and keep each phase minimal and verifiable.
 - Any implementation must preserve the agent-role boundaries and shared-state design described above.

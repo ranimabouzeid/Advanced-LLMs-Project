@@ -28,12 +28,22 @@ select `.venv\Scripts\python.exe` (the Microsoft Python extension is required).
 `backend/requirements.txt` lists the seven direct dependencies without version
 pins; future installations can resolve newer versions.
 
-## Scope
+## Current scope
 
-- `backend/` contains dependency configuration only.
+- `backend/app/warehouse/` contains the domain models and deterministic simulation.
+- `backend/tests/` contains the deterministic test suite.
 - `frontend/` is reserved for a later phase.
 - `docs/` contains setup documentation.
 - `.venv/` is local and ignored by Git.
 
-No React initialization, FastAPI service, LangGraph agents, or warehouse logic
-is included in Phase 1.
+Phase 1 added environment setup only. The subsequent user-authorized Phase 2 added
+domain models and basic simulation; see [warehouse usage](warehouse.md).
+There is no React initialization, FastAPI service, LangGraph agent, or pathfinding.
+
+Run the tests from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+The repository-local `pytest.ini` configures test discovery and backend imports.
