@@ -11,11 +11,20 @@ from typing import Annotated, Literal
 
 from dotenv import dotenv_values
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, field_validator
 
 
 class ConfigurationError(ValueError):
     """Missing live-model configuration or optional provider integration."""
+
+
+def structured_output(client: BaseChatModel, schema: type[BaseModel]) -> Runnable:
+    """Configure the shared Gemini client for native Pydantic structured output.
+
+    This wraps an injected client; it does not create another provider client.
+    """
+    return client.with_structured_output(schema, method="json_schema")
 
 
 class LLMSettings(BaseModel):

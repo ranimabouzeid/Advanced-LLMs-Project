@@ -4,12 +4,12 @@ Each public helper owns a narrow set of outputs and explicit invalidations.
 No helper mutates state, runs an agent, or commits movement.
 """
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from app.warehouse.models import DeliveryPlan, OrderStatus, WarehouseState
 from app.warehouse.validation import ValidationResult, validate_delivery_plan
 
-from .state import OrderSelection, PlanningOutcome, RunOutcome, WarehouseGraphState
+from .state import NodeActivity, OrderSelection, PlanningOutcome, RunOutcome, WarehouseGraphState
 
 
 class StateUpdate(TypedDict, total=False):
@@ -23,6 +23,7 @@ class StateUpdate(TypedDict, total=False):
     execution_requested: bool
     run_outcome: RunOutcome
     error_message: str | None
+    node_activity: tuple[NodeActivity, ...]
 
 
 def _validated(state: WarehouseGraphState, update: StateUpdate) -> StateUpdate:
@@ -44,11 +45,43 @@ def select_order(state: WarehouseGraphState, selection: OrderSelection) -> State
                               "selected_robot_id": None})
 
 
+def order_result(state: WarehouseGraphState, *, selection: OrderSelection | None = None,
+                 outcome: Literal["running", "no_work", "failed"],
+                 error: str | None = None) -> StateUpdate:
+    """Order-only result with the existing downstream invalidation contract."""
+    if (outcome == "running") != (selection is not None):
+        raise ValueError("Successful order selection requires exactly one selection")
+    if (outcome == "failed") != (error is not None):
+        raise ValueError("Failed order selection requires an error")
+    update = (select_order(state, selection) if selection is not None else
+              {**_clear_proposal(), "order_selection": None, "selected_robot_id": None})
+    record = NodeActivity(node="order", status="failed" if outcome == "failed" else "completed",
+                          message=error or ("Order selected" if selection else "No pending orders"))
+    update.update(run_outcome=outcome, error_message=error,
+                  node_activity=(*state.node_activity, record))
+    return _validated(state, update)
+
+
 def select_robot(state: WarehouseGraphState, robot_id: str) -> StateUpdate:
     """Fleet owns the robot choice; preserve the selected order."""
     if state.order_selection is None:
         raise ValueError("Select an order before selecting a robot")
     return _validated(state, {**_clear_proposal(), "selected_robot_id": robot_id})
+
+
+def fleet_result(state: WarehouseGraphState, *, robot_id: str | None = None,
+                 outcome: Literal["running", "no_robot", "failed"],
+                 message: str) -> StateUpdate:
+    """Fleet owns robot selection, diagnostics and downstream invalidations only."""
+    if (outcome == "running") != (robot_id is not None):
+        raise ValueError("Successful fleet selection requires a robot")
+    update = (select_robot(state, robot_id) if robot_id is not None else
+              {**_clear_proposal(), "selected_robot_id": None})
+    record = NodeActivity(node="fleet", status="failed" if outcome == "failed" else "completed",
+                          message=message)
+    update.update(run_outcome=outcome, error_message=message if outcome == "failed" else None,
+                  node_activity=(*state.node_activity, record))
+    return _validated(state, update)
 
 
 def replace_warehouse(state: WarehouseGraphState, warehouse: WarehouseState) -> StateUpdate:

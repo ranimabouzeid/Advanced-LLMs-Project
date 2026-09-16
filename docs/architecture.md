@@ -4,8 +4,8 @@ The shared-state portion of Milestone B lives in `backend/app/graph/state.py`
 and its deterministic partial-update helpers in `backend/app/graph/updates.py`.
 `WarehouseGraphState` is a frozen Pydantic BaseModel with forbidden extra fields.
 It imports the existing domain models; domain code does not import graph code.
-No production agents, nodes, graph wiring, reducers, or checkpoint integration
-are implemented. Shared model configuration lives outside graph state in
+Only the standalone Order and Fleet Agents are implemented; other roles, graph wiring,
+reducers, and checkpoint integration are not implemented. Shared model configuration lives outside graph state in
 `backend/app/config.py`; no client is created at import time.
 
 ## Authority and ownership
@@ -151,7 +151,7 @@ permanent default or assumed available to the account. The factory explicitly
 passes `vertexai=False` to use the Gemini Developer API with `GOOGLE_API_KEY`,
 independent of ambient Vertex AI settings. This application uses only
 `GOOGLE_API_KEY`, rather than the SDK's alternate credential variable fallback.
-No live smoke test or agent is implemented.
+No live smoke test is implemented.
 
 The audit also verified the concrete stable example
 [`gemini-2.5-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash):
@@ -159,3 +159,87 @@ Google documents both function calling and structured outputs. It remains a
 documentation example rather than a code default or a guarantee of account access.
 The optional provider package is not installed, so real client construction and
 live responses remain untested. Mocked construction and offline injection pass.
+
+## Milestone C: Order Agent only
+
+`graph/agents.py` exposes `order_agent(state, client=shared_client, tools=...)`.
+The caller injects the shared client; the agent never creates a provider client.
+`graph/tools.py` exposes only `OrderTools.pending_orders` and `order_metadata`,
+which inspect the supplied immutable snapshot and return existing Order records.
+There are no robot, routing, validation, or mutation tools in this toolset.
+
+Tool invocation is explicit: the agent looks up pending orders in creation order,
+reads their metadata, and supplies those results as model context. No model tool
+dispatch loop exists and the model cannot provide warehouse_json. The prompt
+prefers creation order, but eligibility (not model compliance with that preference)
+is enforced in code; any returned pending ID is valid. No numeric priority exists.
+
+`app.config.structured_output` wraps the injected client using
+`with_structured_output(OrderSelection, method="json_schema")`. This requests
+Gemini native structured output with the Pydantic class. The agent revalidates
+the result with Pydantic, then checks membership in pending IDs from the actual
+snapshot. The existing state validator provides an additional eligibility check.
+Shape validation alone cannot authorize a nonexistent or non-pending ID.
+
+`updates.order_result` uses `select_order` for success and the same existing
+proposal-clearing helper for no-work/failure. All outcomes clear the previous
+robot, plan, safety, execution intent, and retry count. Success writes one
+OrderSelection and `running`; empty pending orders skip the model and write
+`no_work`; invalid output or an ordinary tool/model error writes `failed` with a
+short sanitized error. One Order activity record is appended. Warehouse, revision,
+command, and max_replans are never updated by this agent.
+
+Provider timeout configuration remains in the shared client. The agent handles
+raised TimeoutError explicitly and other provider exceptions as generic failures;
+it does not add a background timeout thread or retry loop. Process interrupts
+are not swallowed. Tests use a fake chat model implementing the structured-output
+boundary with real Pydantic JSON parsing, plus injected failure runnables. No
+Gemini integration package, credentials, or API calls are needed for these tests.
+
+The Order-only increment added 21 tests. Route, Safety, and all production graph
+wiring remain unimplemented; Milestone C is partial.
+
+## Milestone C: Fleet Agent
+
+`fleet_agent(state, client=None, tools=None)` reads the authoritative warehouse and
+existing order selection. Its separate `FleetTools` exposes robot status lookup,
+two-leg Manhattan lower bound, and deterministic candidate evaluation. Evaluation
+calls the existing `plan_delivery` A* implementation; temporary plans are discarded,
+not published as a Route proposal. Candidate results include a typed exclusion
+reason, battery, lower bound, and actual steps when reachable.
+
+Eligibility requires a pending selected order, an idle empty robot, two reachable
+route legs, and battery at least equal to actual combined A* steps. Other robots
+remain obstacles through the existing planner. Manhattan is diagnostic only:
+detours can cost more. Exactly sufficient battery passes; zero battery can pass
+an entirely zero-step delivery. Busy, charging, offline, unreachable, and
+insufficient-battery candidates are excluded.
+
+Without a client, Fleet chooses minimum `(total_steps, robot_id)`, using lexical
+identifier order for equal costs regardless of warehouse tuple ordering. Optional
+model assistance receives only verified eligible candidate records through the
+shared structured-output adapter. Its `FleetSelection(robot_id, explanation)` is
+parsed by Pydantic and checked for both candidate membership and compliance with
+the same deterministic policy. Invalid, malformed, or out-of-policy choices fail;
+they are not silently replaced. The model cannot set cost, route, or safety fields.
+Activity records use the deterministic selection reason rather than generated claims.
+
+Per the Fleet-specific authorization, every empty eligible set produces `no_robot`,
+including the all-unreachable case. Exclusion categories remain visible in activity
+diagnostics. This refines the earlier proposal to emit unreachable from Fleet;
+future Route planning can still produce the separate unreachable outcome.
+No model call occurs for an empty candidate set. Missing order selection, ordinary
+tool/model exceptions, and timeouts return `failed` with sanitized diagnostics.
+
+`fleet_result` delegates successful selection to the existing `select_robot` helper
+and shares its proposal-clearing behavior for failure/no_robot. The exact partial
+update contains selected_robot_id, delivery_plan, safety, planning_outcome,
+error_message, execution_requested, run_outcome, replan_count, and node_activity.
+Plan/safety become None, planning becomes not_planned, execution intent becomes
+false, and retries reset to zero. Success sets running, an empty candidate set sets
+no_robot, and failures set failed. One Fleet activity record is appended.
+Order selection, warehouse/revision, command, and max_replans are preserved.
+
+The full suite has 307 passing offline tests, including 36 Fleet cases with actual
+A* detours and injected structured-model/tool failures. No provider installation
+or live credentials were needed. Route Agent and Safety Agent are not implemented.
