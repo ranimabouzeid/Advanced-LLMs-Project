@@ -15,7 +15,7 @@ The project is intentionally structured in phases. The application is not to be 
 - Deterministic A* is implemented in `backend/app/warehouse/routing.py`, with 26 routing cases and 85 total passing tests. It returns a shortest endpoint-inclusive route or `None`; invalid dimensions/out-of-bounds inputs raise `ValueError`.
 - The latest authorized portion of Milestone A adds assignment/pickup/delivery primitives, two-leg A* plans, warehouse revision tracking, and typed route/delivery validation. The updated full suite has 148 passing cases.
 - Atomic complete-delivery execution is now implemented via `WarehouseSimulation.execute_delivery(plan)`, with a typed result and one final snapshot publication. Milestone A is complete with 169 passing tests. Do not begin Milestone B or later milestones without an explicit request.
-- Standalone Order, Fleet, and Route Agents are implemented. Order uses read-only order tools and Pydantic structured output with domain eligibility checks. Fleet uses deterministic two-leg A* eligibility/cost checks and stable selection, with optional restricted model assistance. Route delegates fresh two-leg planning to the existing deterministic planner, without an LLM or safety approval. The full suite has 324 passing tests, including 21 Order, 36 Fleet, and 17 Route cases. Milestone C remains partial; do not implement Safety without explicit authorization. No workflow wiring, API, or React application exists.
+- All four standalone roles are implemented. Order uses structured output and domain eligibility checks; Fleet uses deterministic A* eligibility/cost and stable selection; Route delegates two-leg planning; Safety publishes existing deterministic validation findings, with optional non-authoritative summaries. The full suite has 347 passing offline tests, including 21 Order, 36 Fleet, 17 Route, and 23 Safety cases. No final workflow wiring, conditional edges, MemorySaver integration, API, or React application exists. Do not begin later milestones without explicit authorization.
 - Milestone B shared state, deterministic partial-update/invalidation helpers, and shared Gemini configuration are implemented. Its offline audit passes with 250 total tests, including compiled test-graph updates and checkpoint-serializer round trips. No production workflow or MemorySaver integration exists. The optional Gemini integration package and live calls remain untested; no credentials are needed for tests. Do not begin Milestone C without explicit authorization.
 - Future architecture and file examples below are design requirements, not authorization to create the whole application.
 - Update this status only when a phase has actually been completed and verified.
@@ -52,6 +52,7 @@ backend/tests/test_config.py
 backend/tests/test_order_agent.py
 backend/tests/test_fleet_agent.py
 backend/tests/test_route_agent.py
+backend/tests/test_safety_agent.py
 pytest.ini
 frontend/.gitkeep
 docs/environment.md
@@ -333,7 +334,7 @@ Basic checks from the repository root:
 git status --short
 ```
 
-The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 324 passing offline cases. Do not edit unrelated parent configuration.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 347 passing offline cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 

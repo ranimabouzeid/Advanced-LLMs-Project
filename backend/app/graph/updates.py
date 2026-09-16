@@ -29,7 +29,7 @@ class StateUpdate(TypedDict, total=False):
 def _validated(state: WarehouseGraphState, update: StateUpdate) -> StateUpdate:
     # model_copy(update=...) bypasses validation. Validate the merged candidate,
     # then return only the explicitly owned/invalidated channels, including None.
-    candidate = WarehouseGraphState.model_validate({**state.model_dump(), **update})
+    candidate = WarehouseGraphState.model_validate({**state.model_dump(exclude=set(update)), **update})
     return {key: getattr(candidate, key) for key in update}
 
 
@@ -168,6 +168,30 @@ def record_safety(state: WarehouseGraphState, result: ValidationResult) -> State
         raise ValueError("Safety result does not match current deterministic validation")
     return _validated(state, dict(safety=expected, run_outcome="ready" if expected.route_valid else "failed",
                                  error_message=None if expected.route_valid else "Delivery plan failed validation"))
+
+
+def safety_result(state: WarehouseGraphState, *, result: ValidationResult | None = None,
+                  error: str | None = None, summary: str | None = None,
+                  discard_plan: bool = False) -> StateUpdate:
+    """Safety owns findings/diagnostics; rejection or failure revokes execution intent."""
+    if result is None and error is None:
+        raise ValueError("Safety requires findings or an explicit failure")
+    if discard_plan and result is not None:
+        raise ValueError("Cannot publish findings for a discarded plan")
+    update = (record_safety(state, result) if result is not None else
+              dict(safety=None, run_outcome="failed", error_message=error))
+    if error is not None:
+        update.update(run_outcome="failed", error_message=error)
+    if result is None or not result.route_valid or error is not None:
+        update["execution_requested"] = False
+    if discard_plan:
+        update.update(delivery_plan=None, planning_outcome="failed")
+    status = "failed" if error else "completed" if result.route_valid else "rejected"
+    message = error or ("Deterministic plan approved" if result.route_valid else "Deterministic plan rejected")
+    if summary:
+        message = (message + "; model summary (non-authoritative): " + summary)[:300]
+    update["node_activity"] = (*state.node_activity, NodeActivity(node="safety", status=status, message=message))
+    return _validated(state, update)
 
 
 def is_plan_approved(state: WarehouseGraphState) -> bool:

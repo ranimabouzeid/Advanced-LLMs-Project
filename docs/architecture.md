@@ -4,7 +4,7 @@ The shared-state portion of Milestone B lives in `backend/app/graph/state.py`
 and its deterministic partial-update helpers in `backend/app/graph/updates.py`.
 `WarehouseGraphState` is a frozen Pydantic BaseModel with forbidden extra fields.
 It imports the existing domain models; domain code does not import graph code.
-Only the standalone Order, Fleet, and Route Agents are implemented; Safety, graph wiring,
+All four standalone roles are implemented; graph wiring,
 reducers, and checkpoint integration are not implemented. Shared model configuration lives outside graph state in
 `backend/app/config.py`; no client is created at import time.
 
@@ -196,8 +196,7 @@ are not swallowed. Tests use a fake chat model implementing the structured-outpu
 boundary with real Pydantic JSON parsing, plus injected failure runnables. No
 Gemini integration package, credentials, or API calls are needed for these tests.
 
-The Order-only increment added 21 tests. Safety and all production graph
-wiring remain unimplemented; Milestone C is partial.
+The Order-only increment added 21 tests. Production graph wiring remains unimplemented.
 
 ## Milestone C: Fleet Agent
 
@@ -242,7 +241,7 @@ Order selection, warehouse/revision, command, and max_replans are preserved.
 
 The full suite has 307 passing offline tests, including 36 Fleet cases with actual
 A* detours and injected structured-model/tool failures. No provider installation
-or live credentials were needed. Safety Agent is not implemented.
+or live credentials were needed. Safety was added in the subsequent increment below.
 
 ## Milestone C: Route Agent
 
@@ -272,5 +271,40 @@ The full suite has 324 passing tests, including 17 Route cases covering zero-ste
 legs, obstacles represented by blocked cells, other robot occupancy, unreachable
 endpoints, revision retention, exact domain-plan equality, failure handling, and
 owned-field invalidation. Existing domain tests cover permanent shelf obstacles.
-Tests use no credentials or live calls. Milestone C remains partial until Safety
-is separately authorized and implemented.
+Tests use no credentials or live calls. Safety was added in the subsequent increment below.
+
+## Milestone C: Safety Agent
+
+`safety_agent(state, tools=None, client=None)` checks the current DeliveryPlan,
+snapshot/revision, and selected order/robot. Retry counts and limits are preserved;
+Safety does not schedule retries or execute movement. Its separate `SafetyTools`
+exposes `check_delivery_plan`, delegating directly to Milestone A validation. That
+function calls route validation for both legs, checks occupied robot cells and
+conflicts, battery, lifecycle/status, endpoints, bounds, obstacles, and revision.
+There is no second implementation of these rules.
+
+`safety_result` uses `record_safety`, which independently compares the tool output
+with deterministic validation before accepting it. The authoritative field is
+`safety: ValidationResult`; route_valid and collision_risk remain nested, with all
+reasons and conflicts retained. Missing validation or a tool failure clears prior
+safety to None (unchecked), sets failed, and revokes execution intent. Missing or
+mismatched selections fail safely. Malformed plan schemas additionally discard
+the malformed proposal and mark planning failed; valid schemas with invalid route
+geometry retain the plan and publish deterministic rejection findings.
+
+Success writes safety, run_outcome=ready, error_message=None, and one activity
+record. Rejection sets failed and clears execution_requested. No warehouse,
+selection, retry, or command fields change. Ready is not movement permission:
+later execution must still require intent and independently revalidate.
+
+An optional injected client may produce `SafetyExplanation(explanation)` only,
+after deterministic validation. Its text appears solely in an activity message
+explicitly labeled non-authoritative. Even contradictory text cannot change
+findings or flags. Model error/timeout/malformed summary preserves actual findings
+but sets failed and revokes execution intent. Without a client no model call occurs.
+
+The suite now has 347 passing offline tests, including 23 Safety cases. Coverage
+includes safe plans, blocked/occupied cells, stale revision, battery/status,
+malformed or missing plans, missing/mismatched selections, fabricated tool approval,
+tool failures, contradictory fake-model summaries, and model failures/timeouts.
+No Safety workflow edges, MemorySaver integration, API, or frontend were added.

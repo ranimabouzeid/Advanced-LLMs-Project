@@ -1,4 +1,4 @@
-"""Standalone Order, Fleet, and Route roles; no graph construction or execution."""
+"""Four standalone roles; no graph construction, conditional edges, or execution."""
 
 import json
 
@@ -8,10 +8,11 @@ from pydantic import ValidationError
 
 from app.config import structured_output
 from app.warehouse.models import DeliveryPlan, Identifier, OrderStatus
+from app.warehouse.validation import ValidationResult
 
 from .state import OrderSelection, ShortText, WarehouseGraphState, WorkflowModel
-from .tools import FleetTools, OrderTools, RouteTools
-from .updates import StateUpdate, fleet_result, order_result, route_result
+from .tools import FleetTools, OrderTools, RouteTools, SafetyTools
+from .updates import StateUpdate, fleet_result, order_result, route_result, safety_result, record_safety
 
 
 def order_agent(state: WarehouseGraphState, *, client: BaseChatModel,
@@ -142,3 +143,51 @@ def route_agent(state: WarehouseGraphState, *, tools: RouteTools | None = None) 
     except Exception:
         error = "Route planning failed"
     return route_result(state, outcome="failed", error=error)
+
+
+class SafetyExplanation(WorkflowModel):
+    """Optional narrative only; there are deliberately no approval/conflict fields."""
+
+    explanation: ShortText
+
+
+def safety_agent(state: WarehouseGraphState, *, tools: SafetyTools | None = None,
+                 client: BaseChatModel | None = None) -> StateUpdate:
+    """Validate first, optionally summarize second. Never execute or replan."""
+    if state.delivery_plan is None:
+        return safety_result(state, error="Safety requires a delivery plan")
+    try:
+        if not isinstance(state.delivery_plan, DeliveryPlan):
+            raise ValueError("Invalid plan type")
+        plan = DeliveryPlan.model_validate(state.delivery_plan.model_dump())
+    except Exception:
+        return safety_result(state, error="Malformed delivery plan", discard_plan=True)
+    if (state.order_selection is None or state.selected_robot_id is None
+            or plan.order_id != state.order_selection.order_id or plan.robot_id != state.selected_robot_id):
+        return safety_result(state, error="Plan does not match current selections")
+    tools = tools if tools is not None else SafetyTools()
+    try:
+        result = tools.check_delivery_plan(state.warehouse, plan)
+        if not isinstance(result, ValidationResult):
+            raise ValueError("Invalid safety result type")
+        # Existing helper independently verifies findings before any model sees them.
+        record_safety(state, result)
+    except Exception:
+        return safety_result(state, error="Deterministic safety validation failed")
+    summary = None
+    if client is not None:
+        try:
+            response = structured_output(client, SafetyExplanation).invoke([
+                SystemMessage(content="Summarize these deterministic findings without changing them. "
+                                      "Do not approve, remove conflicts, or propose a replacement route."),
+                HumanMessage(content=result.model_dump_json()),
+            ])
+            if isinstance(response, SafetyExplanation):
+                response = response.model_dump()
+            parsed = (SafetyExplanation.model_validate_json(response) if isinstance(response, str)
+                      else SafetyExplanation.model_validate(response))
+            summary = parsed.explanation
+        except Exception:
+            # Preserve actual findings, but fail closed for this invocation.
+            return safety_result(state, result=result, error="Safety summary failed")
+    return safety_result(state, result=result, summary=summary)

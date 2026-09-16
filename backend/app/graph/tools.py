@@ -6,6 +6,7 @@ from pydantic import Field
 
 from app.warehouse.models import DeliveryPlan, DomainModel, Identifier, Order, OrderStatus, Robot, RobotStatus, WarehouseState
 from app.warehouse.routing import plan_delivery
+from app.warehouse.validation import ValidationResult, validate_delivery_plan
 
 
 class OrderTools:
@@ -76,3 +77,11 @@ class RouteTools:
                             robot_id: Identifier) -> DeliveryPlan | None:
         """Return the existing planner's output unchanged; None means unreachable."""
         return plan_delivery(warehouse, order_id, robot_id)
+
+
+class SafetyTools:
+    """Read-only complete-plan checks, including both routes and robot conflicts."""
+
+    def check_delivery_plan(self, warehouse: WarehouseState, plan: DeliveryPlan) -> ValidationResult:
+        """Reuse domain route, occupancy, revision, battery, and status validation."""
+        return validate_delivery_plan(warehouse, plan)
