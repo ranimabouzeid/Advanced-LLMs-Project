@@ -208,3 +208,36 @@ def is_plan_approved(state: WarehouseGraphState) -> bool:
                 and state.safety is not None and state.safety.route_valid
                 and not state.safety.collision_risk
                 and validate_delivery_plan(state.warehouse, plan) == state.safety)
+
+
+def retry_result(state: WarehouseGraphState, result: StateUpdate) -> StateUpdate:
+    """Adapt a fresh Route result without losing a consumed retry attempt."""
+    if state.delivery_plan is None or state.replan_count >= state.max_replans:
+        raise ValueError("Retry requires a proposal and remaining budget")
+    update = dict(result)
+    if result.get("planning_outcome") == "planned":
+        update.update(replan(state, result["delivery_plan"]))
+    else:
+        update["replan_count"] = state.replan_count + 1
+    return _validated(state, update)
+
+
+def workflow_failure(state: WarehouseGraphState, message: str) -> StateUpdate:
+    """Terminate without changing domain state or retry accounting."""
+    return _validated(state, dict(run_outcome="failed", error_message=message,
+                                 execution_requested=False))
+
+
+def execution_result(state: WarehouseGraphState, *, warehouse: WarehouseState | None = None,
+                     error: str | None = None) -> StateUpdate:
+    """Publish one atomic delivery snapshot, or diagnostics only on failure."""
+    if (warehouse is None) == (error is None):
+        raise ValueError("Execution requires exactly one snapshot or error")
+    update = (replace_warehouse(state, warehouse) if warehouse is not None else
+              workflow_failure(state, error))
+    update.update(run_outcome="delivered" if warehouse is not None else "failed",
+                  execution_requested=False, error_message=error,
+                  node_activity=(*state.node_activity, NodeActivity(
+                      node="execution", status="completed" if warehouse is not None else "failed",
+                      message=error or "Atomic delivery completed")))
+    return _validated(state, update)

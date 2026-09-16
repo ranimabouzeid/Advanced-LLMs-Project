@@ -308,3 +308,69 @@ includes safe plans, blocked/occupied cells, stale revision, battery/status,
 malformed or missing plans, missing/mismatched selections, fabricated tool approval,
 tool failures, contradictory fake-model summaries, and model failures/timeouts.
 No Safety workflow edges, MemorySaver integration, API, or frontend were added.
+
+## Milestone D: command workflow
+
+`graph/graph.py:build_graph` compiles a sequential `WarehouseGraphState` graph,
+with one injected model client and the existing role tools. Fleet and Safety
+remain deterministic by default; optional model assistance reuses that client.
+There is no checkpointer, session storage, API, or frontend.
+
+Nodes are dispatch, order, fleet, route, retry_route, safety, execution, and failure.
+Dispatch establishes execution intent only for an explicit execute command and
+clears previous safety. Its entry schema permits malformed proposal data solely
+to return failed with that proposal discarded; subsequent nodes use strict state.
+Other invalid domain/state input remains subject to Pydantic validation.
+
+PLAN follows Order -> Fleet -> Route -> Safety. Conditional edges terminate on
+no_work, no_robot, unreachable, or role failure. A safe proposal ends ready without
+movement. EXECUTE starts at Safety, revalidating the supplied proposal against the
+supplied authoritative snapshot. Missing proposals fail. No persisted state is
+loaded: the caller passes the full current input to each invocation.
+
+Safety's typed activity status distinguishes deterministic rejection from an
+operational failure. Model/tool failure is terminal, even if deterministic findings
+are also present. Branch selectors do not parse diagnostic text. A rejection is
+replannable only with a newer warehouse revision and routing-related findings
+(stale_plan, blocked, obstacle, wrong_start, or occupied-cell conflicts). Invalid
+geometry, unavailable robots, insufficient battery, and other terminal findings
+do not enter the retry loop. A revision-only change permits one conservative refresh.
+
+The current authoritative snapshot carries every A* constraint. The existing
+planner already includes blocked cells and other robots' positions; no parallel
+obstacle list exists. Once a plan uses the current revision, another rejection
+cannot cause a same-snapshot retry. Unreachable is immediately terminal.
+
+The retry adapter calls the existing Route Agent but adapts its partial update
+before publication. Initial planning sets replan_count=0. Every admitted retry
+consumes exactly one attempt, including unreachable and tool-failure outcomes;
+fresh-plan behavior cannot reset the count. max_replans=3 permits three retries,
+with no fourth attempt. Successful retry publication reuses the existing replan
+helper and clears safety and execution intent before the next validation.
+
+Execution independently requires execute command, explicit intent, ready outcome,
+matching plan/selection IDs, present conflict-free deterministic approval, and
+matching revisions. `is_plan_approved` revalidates the stored findings. A temporary
+WarehouseSimulation then uses existing atomic execute_delivery, which validates
+again. Success publishes through replace_warehouse with exactly one revision
+increment, clears obsolete proposal/selection/safety, and reports delivered.
+Failure publishes diagnostics without changing the warehouse.
+
+None safety cannot authorize the execution node. At workflow entry, EXECUTE runs
+Safety first, so an unchecked proposal can only execute after fresh approval.
+Every replacement proposal clears execution intent and ends ready for review,
+even when its coordinates happen to match the old proposal. Only a new explicit
+execute invocation restores intent. Reinvoking an execute input is a new command.
+
+Activity examples (history is retained across invocations):
+- Normal PLAN: order, fleet, route, safety.
+- PLAN with one changed-snapshot retry: order, fleet, route, safety (rejected),
+  route, safety (completed).
+- EXECUTE appends: safety, execution.
+
+Compiled-workflow tests use fake models and real A*/validation/execution. Test-only
+wrappers publish domain-generated snapshot changes between nodes to exercise
+recovery; production PLAN nodes never mutate warehouse state. Tests cover early
+termination, exact retry budgets, consumed failed attempts, changed occupancy/start
+positions, review-only replacement, independent execution guards, malformed plans,
+operational failures, and atomic publication/rollback.
