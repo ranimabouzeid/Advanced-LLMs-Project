@@ -159,6 +159,13 @@ legs, insufficient battery, and failed-delivery rollback all pass offline.
 
 ## 4. Milestone B — Shared state, ownership, and configuration
 
+**Audit status:** Offline acceptance verified with 250 passing tests. Shared state,
+invalidation helpers, compiled test-graph partial updates, JSON and checkpoint
+serializer round trips, and shared Gemini configuration are covered. No production
+agents or MemorySaver integration were added. The optional live Gemini package is
+not installed; live client construction/account access remain untested. This does
+not authorize Milestone C.
+
 **Owner:** Person 1. Design contracts alongside Milestone A; integrate after A passes.
 
 ### One authoritative warehouse snapshot
@@ -514,5 +521,5 @@ Keep `.venv`, `.env`, Python caches, frontend dependencies, and build output ign
 update `.gitignore` when the frontend is introduced.
 
 This plan adds no application code and does not change the Downloads source file.
-Milestone A has subsequently been implemented and verified. The next proposed
-milestone is B; it requires explicit authorization before implementation begins.
+Milestones A and B have subsequently passed their offline acceptance checks.
+Milestone C requires explicit authorization before implementation begins.

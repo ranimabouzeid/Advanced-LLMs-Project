@@ -16,6 +16,7 @@ The project is intentionally structured in phases. The application is not to be 
 - The latest authorized portion of Milestone A adds assignment/pickup/delivery primitives, two-leg A* plans, warehouse revision tracking, and typed route/delivery validation. The updated full suite has 148 passing cases.
 - Atomic complete-delivery execution is now implemented via `WarehouseSimulation.execute_delivery(plan)`, with a typed result and one final snapshot publication. Milestone A is complete with 169 passing tests. Do not begin Milestone B or later milestones without an explicit request.
 - No graph agents, API, or React application have been implemented. Further implementation requires an explicit user request.
+- Milestone B shared state, deterministic partial-update/invalidation helpers, and shared Gemini configuration are implemented. Its offline audit passes with 250 total tests, including compiled test-graph updates and checkpoint-serializer round trips. No production workflow or MemorySaver integration exists. The optional Gemini integration package and live calls remain untested; no credentials are needed for tests. Do not begin Milestone C without explicit authorization.
 - Future architecture and file examples below are design requirements, not authorization to create the whole application.
 - Update this status only when a phase has actually been completed and verified.
 
@@ -32,16 +33,28 @@ backend/app/warehouse/models.py
 backend/app/warehouse/simulation.py
 backend/app/warehouse/routing.py
 backend/app/warehouse/validation.py
+backend/app/graph/__init__.py
+backend/app/graph/state.py
+backend/app/graph/updates.py
+backend/app/config.py
+.env.example
 backend/tests/test_models.py
 backend/tests/test_simulation.py
 backend/tests/test_routing.py
 backend/tests/test_validation.py
 backend/tests/test_execution.py
+backend/tests/test_graph_state.py
+backend/tests/test_graph_updates.py
+backend/tests/test_graph_serialization.py
+backend/tests/test_config.py
 pytest.ini
 frontend/.gitkeep
 docs/environment.md
 docs/phase-1-command-log.md
 docs/warehouse.md
+docs/architecture.md
+plan.md
+docs/documenation.md
 ```
 
 ## Final System Architecture
@@ -315,7 +328,7 @@ Basic checks from the repository root:
 git status --short
 ```
 
-The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 169 passing deterministic cases. Do not edit unrelated parent configuration.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 250 passing offline cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 

@@ -4,8 +4,9 @@ The shared-state portion of Milestone B lives in `backend/app/graph/state.py`
 and its deterministic partial-update helpers in `backend/app/graph/updates.py`.
 `WarehouseGraphState` is a frozen Pydantic BaseModel with forbidden extra fields.
 It imports the existing domain models; domain code does not import graph code.
-No production agents, nodes, graph wiring, reducers, model clients,
-configuration module, or checkpoint integration are implemented in this portion.
+No production agents, nodes, graph wiring, reducers, or checkpoint integration
+are implemented. Shared model configuration lives outside graph state in
+`backend/app/config.py`; no client is created at import time.
 
 ## Authority and ownership
 
@@ -57,11 +58,13 @@ as the replacement warehouse. Do not checkpoint that simulation or store the who
 DeliveryExecutionResult, which would duplicate its snapshot and validation result.
 Clients and credentials likewise stay outside state.
 
-JSON serialization and actual compiled-graph partial updates are tested.
-Compatibility with the installed checkpoint serializer is not yet verified.
-MemorySaver, checkpoint retrieval, session isolation/reset, and provider
-configuration remain outside this implementation. Milestone B as a whole is
-not complete.
+JSON serialization, actual compiled-graph partial updates, and round trips through
+the installed langgraph-checkpoint 4.2.0 JsonPlusSerializer are tested. Serializer
+tests cover model objects and channel dictionaries for initial, approved, and
+rejected states, with an explicit model-type allowlist and no pickle fallback.
+This verifies serialization readiness, not MemorySaver integration. MemorySaver,
+checkpoint retrieval, and session isolation/reset remain later-milestone work.
+Milestone B's offline acceptance checks pass; the full suite has 250 passing tests.
 
 ## Partial updates and invalidation
 
@@ -105,3 +108,54 @@ reset it. Deciding whether new feedback is actionable, invoking A*, terminating
 unreachable attempts, and conditional retry dispatch belong to future workflow
 work. The test-only straight-line StateGraph verifies actual channel merging;
 it introduces no production workflow, conditional edges, or checkpointer.
+
+## Shared LLM configuration
+
+`app.config` owns frozen `LLMSettings`, `load_settings`, and
+`create_model_client`. Google Gemini is the initial supported provider; provider-specific
+imports and credential mapping are localized here. No model ID is a code default.
+`LLM_MODEL` must be explicitly configured before constructing a live client.
+
+Application setup will call the factory once and retain its returned client for
+injection into future nodes. The factory is not a global singleton or per-node
+cache. Tests can pass `client=fake` without settings, keys, provider imports, or
+network calls. The injection type is LangChain's `BaseChatModel`, supporting its
+fake chat model subclasses and test mocks. Neither factory path invokes a model.
+
+`load_settings()` reads the process environment. Dotenv loading is explicit:
+`load_settings(env_file=".env")`. Process values override file values, and parsing
+does not mutate the process environment. An explicit `environ={}` isolates tests.
+Missing requested files raise an error; there is no parent-directory discovery or
+dotenv variable interpolation.
+
+| Variable | Meaning |
+| --- | --- |
+| `LLM_PROVIDER` | Currently `google_genai` (default); other values rejected |
+| `LLM_MODEL` | Required nonblank model ID for live construction; no default |
+| `GOOGLE_API_KEY` | Required secret for live construction; omitted from settings dumps/repr |
+| `LLM_TIMEOUT_SECONDS` | Positive timeout up to 300 seconds; default 30 |
+| `LLM_MAX_RETRIES` | Provider request retries, 0–5, default 2; distinct from route replanning |
+
+Only `.env.example` placeholders belong in Git. Settings may be incomplete for
+offline injection; live construction checks required model/key first, then lazily
+imports `langchain-google-genai`. That optional package is not installed or added to the
+base requirements because this milestone needs only configuration and offline
+tests. The missing-package error explains the prerequisite for future live setup.
+
+Provider capability references checked September 16, 2026:
+[LangChain ChatGoogleGenerativeAI](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
+documents the integration package, tool calling, and structured output.
+[Google's Gemini model catalog](https://ai.google.dev/gemini-api/docs/models)
+is the source for choosing the concrete model ID before live use; no model is a
+permanent default or assumed available to the account. The factory explicitly
+passes `vertexai=False` to use the Gemini Developer API with `GOOGLE_API_KEY`,
+independent of ambient Vertex AI settings. This application uses only
+`GOOGLE_API_KEY`, rather than the SDK's alternate credential variable fallback.
+No live smoke test or agent is implemented.
+
+The audit also verified the concrete stable example
+[`gemini-2.5-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash):
+Google documents both function calling and structured outputs. It remains a
+documentation example rather than a code default or a guarantee of account access.
+The optional provider package is not installed, so real client construction and
+live responses remain untested. Mocked construction and offline injection pass.

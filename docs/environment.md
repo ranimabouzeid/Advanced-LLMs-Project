@@ -48,3 +48,18 @@ Run the tests from the repository root:
 ```
 
 The repository-local `pytest.ini` configures test discovery and backend imports.
+
+## Optional LLM configuration
+
+The shared settings/factory are in `backend/app/config.py`. Inspection found
+LangChain 1.4.0, langchain-core 1.6.3, Pydantic 2.13.5, python-dotenv 1.2.3,
+and transitive pydantic-settings 2.15.0, but no provider integration package.
+The implementation uses the existing direct Pydantic/python-dotenv dependencies;
+requirements and installed packages were not changed.
+
+Offline tests inject fake clients and require no credentials. For future live
+Google Gemini setup, `langchain-google-genai` is an optional prerequisite to install in the
+project virtual environment. Copy `.env.example` to ignored `.env`, replace its
+placeholders, and load it explicitly with `load_settings(env_file=".env")`.
+Create one client during application setup and pass it to future consumers.
+See [configuration and ownership](architecture.md#shared-llm-configuration).
