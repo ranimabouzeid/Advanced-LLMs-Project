@@ -3,7 +3,7 @@
 import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from app.graph.state import NodeActivity, OrderSelection, WarehouseGraphState
+from app.graph.state import SafetyDecision, NodeActivity, OrderSelection, WarehouseGraphState
 from app.warehouse import (
     DeliveryPlan, Order, OrderStatus, Package, Position, Robot, RobotConflict,
     RobotStatus, ValidationIssue, ValidationResult, WarehouseSimulation,
@@ -22,7 +22,7 @@ def test_checkpoint_serializer_roundtrip(phase, representation):
         if phase == "rejected":
             simulation.move_robot("robot-2", Position(x=1, y=1))
             simulation.move_robot("robot-2", Position(x=1, y=0))
-        safety = validate_delivery_plan(simulation.state, plan)
+        safety = SafetyDecision(approved=phase == "approved", conflicts=() if phase == "approved" else ("Occupied",), explanation="Mock decision")
         fields = dict(order_selection=OrderSelection(order_id="o", explanation="First pending"),
                       selected_robot_id="robot-1", delivery_plan=plan, safety=safety,
                       planning_outcome="planned" if phase == "approved" else "stale",
@@ -30,10 +30,10 @@ def test_checkpoint_serializer_roundtrip(phase, representation):
                       node_activity=(NodeActivity(node="route", status="completed"),
                                      NodeActivity(node="safety", status="completed")))
         if phase == "rejected":
-            assert safety.reasons and safety.conflicts
+            assert safety.conflicts
     state = WarehouseGraphState(warehouse=simulation.state, command="plan", **fields)
     serializer = JsonPlusSerializer(allowed_msgpack_modules=[
-        WarehouseGraphState, OrderSelection, NodeActivity, WarehouseState,
+        WarehouseGraphState, OrderSelection, SafetyDecision, NodeActivity, WarehouseState,
         DeliveryPlan, ValidationResult, ValidationIssue, RobotConflict,
         Order, OrderStatus, Package, Position, Robot, RobotStatus,
     ])
@@ -50,8 +50,8 @@ def test_checkpoint_serializer_roundtrip(phase, representation):
     assert reconstructed.warehouse_revision == state.warehouse_revision
     if phase != "initial":
         assert isinstance(reconstructed.delivery_plan, DeliveryPlan)
-        assert isinstance(reconstructed.safety, ValidationResult)
+        assert isinstance(reconstructed.safety, SafetyDecision)
         assert [record.node for record in reconstructed.node_activity] == ["route", "safety"]
     if phase == "rejected":
-        assert isinstance(reconstructed.safety.reasons[0], ValidationIssue)
-        assert isinstance(reconstructed.safety.conflicts[0], RobotConflict)
+        assert isinstance(reconstructed.safety.conflicts[0], str)
+        assert reconstructed.safety.approved is False

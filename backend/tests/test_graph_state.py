@@ -5,7 +5,7 @@ import json
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from app.graph.state import NodeActivity, OrderSelection, WarehouseGraphState
+from app.graph.state import SafetyDecision, NodeActivity, OrderSelection, WarehouseGraphState
 from app.warehouse import (
     DeliveryPlan, Position, ValidationResult, WarehouseSimulation, WarehouseState,
     plan_delivery, validate_delivery_plan,
@@ -60,7 +60,7 @@ def test_retry_boundaries(simulation, limit):
 
 def test_nested_models_and_json_roundtrip(simulation):
     plan = plan_delivery(simulation.state, "o1", "robot-1")
-    safety = validate_delivery_plan(simulation.state, plan)
+    safety = SafetyDecision(approved=True, explanation="Mock approval")
     state = WarehouseGraphState(
         warehouse=simulation.state, command="execute", execution_requested=True,
         order_selection=OrderSelection(order_id="o1", explanation="First pending order"),
@@ -74,7 +74,7 @@ def test_nested_models_and_json_roundtrip(simulation):
     assert data["warehouse"]["revision"] == 1
     assert "warehouse_revision" not in data
     assert "route_valid" not in data
-    assert data["safety"]["route_valid"] is True
+    assert data["safety"]["approved"] is True
     assert data["delivery_plan"]["pickup_route"][0] == {"x": 0, "y": 0}
     assert data["warehouse"]["obstacles"] == sorted(data["warehouse"]["obstacles"], key=lambda p: (p["x"], p["y"]))
     restored = WarehouseGraphState.model_validate_json(state.model_dump_json())
@@ -82,7 +82,7 @@ def test_nested_models_and_json_roundtrip(simulation):
     assert WarehouseGraphState.model_validate(state.model_dump()) == state
     assert isinstance(restored.warehouse, WarehouseState)
     assert isinstance(restored.delivery_plan, DeliveryPlan)
-    assert isinstance(restored.safety, ValidationResult)
+    assert isinstance(restored.safety, SafetyDecision)
     assert isinstance(restored.warehouse.obstacles, frozenset)
     assert isinstance(restored.delivery_plan.pickup_route, tuple)
     assert [item.node for item in restored.node_activity] == ["route", "safety"]
@@ -91,11 +91,11 @@ def test_nested_models_and_json_roundtrip(simulation):
 def test_unchecked_and_rejected_safety_are_distinct(simulation):
     plan = plan_delivery(simulation.state, "o1", "robot-1")
     simulation.add_blocked_cell(Position(x=5, y=0))
-    safety = validate_delivery_plan(simulation.state, plan)
+    safety = SafetyDecision(approved=False, conflicts=("Blocked",), explanation="Mock rejection")
     state = WarehouseGraphState(warehouse=simulation.state, command="plan", safety=safety)
-    assert state.safety is not None and state.safety.route_valid is False
+    assert state.safety is not None and state.safety.approved is False
     restored = WarehouseGraphState.model_validate_json(state.model_dump_json())
-    assert restored.safety.reasons == safety.reasons
+    assert restored.safety.conflicts == safety.conflicts
 
 
 @pytest.mark.parametrize("outcome", ["idle", "running", "ready", "delivered", "no_work", "no_robot", "unreachable", "failed"])
@@ -167,5 +167,5 @@ def test_initial_json_roundtrip_and_schema(simulation):
     schema = WarehouseGraphState.model_json_schema()
     assert "WarehouseState" in schema["$defs"]
     assert "DeliveryPlan" in schema["$defs"]
-    assert "ValidationResult" in schema["$defs"]
+    assert "SafetyDecision" in schema["$defs"]
     assert "warehouse_revision" not in schema["properties"]

@@ -532,3 +532,9 @@ footer {
     transform:translateY(3px);
   }
 }
+
+/* Staging markers and final post-delivery movement. */
+.parking-marker { color: #6d4ca3; font-size: .7rem; font-weight: 700; }
+.route-parking polyline { stroke: #9b74cf; stroke-width: .08; stroke-dasharray: .12 .12; fill: none; }
+.route-parking circle { fill: #9b74cf; }
+.parking-line { width: 20px; border-top: 2px dotted #9b74cf; display: inline-block; }

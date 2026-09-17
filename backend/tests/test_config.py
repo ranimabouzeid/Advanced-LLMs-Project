@@ -130,3 +130,30 @@ def test_real_groq_structured_order_parsing_offline(monkeypatch, arguments, vali
     assert calls[0]["tool_choice"] == {"type": "function", "function": {"name": "OrderSelection"}}
     schema = calls[0]["tools"][0]["function"]["parameters"]
     assert set(schema["required"]) == {"order_id", "explanation"}
+
+
+@pytest.mark.parametrize("schema_name, output", [
+    ("FleetSelection", {"robot_id": "r1", "explanation": "Chosen"}),
+    ("LLMRoutePlan", {"robot_id": "r1", "order_id": "o1", "outcome": "planned",
+                      "route_to_pickup": [{"x": 0, "y": 0}],
+                      "route_to_dropoff": [{"x": 0, "y": 0}], "explanation": "Already there"}),
+    ("SafetyDecision", {"approved": True, "conflicts": [], "explanation": "Approved"}),
+    ("LLMMovementPlan", {"robot_id": "r1", "route": [{"x": 7, "y": 9}], "explanation": "Parked"}),
+])
+def test_real_groq_other_role_schemas_offline(monkeypatch, schema_name, output):
+    import json
+    from app.config import structured_output
+    from app.graph import state
+    schema = getattr(state, schema_name)
+    model = create_model_client(LLMSettings(model="test-model", api_key="test-placeholder"))
+    calls = []
+    def completion(**kwargs):
+        calls.append(kwargs)
+        return {"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "offline-call", "type": "function", "function": {
+                    "name": schema_name, "arguments": json.dumps(output)}}]}}], "model": "test-model"}
+    monkeypatch.setattr(model.client, "create", completion)
+    assert structured_output(model, schema).invoke("Decide") == schema.model_validate(output)
+    assert len(calls) == 1
+    assert calls[0]["tool_choice"]["function"]["name"] == schema_name

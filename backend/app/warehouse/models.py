@@ -104,6 +104,7 @@ class WarehouseState(DomainModel):
     blocked_cells: frozenset[Position] = frozenset()
     dropoff_locations: frozenset[Position] = Field(min_length=1)
     orders: tuple[Order, ...] = ()
+    parking_cells: tuple[Position, ...] = (Position(x=7, y=9), Position(x=8, y=9), Position(x=8, y=8))
 
     @field_serializer("obstacles", "blocked_cells", "dropoff_locations")
     def serialize_cells(self, cells: frozenset[Position]) -> list[dict[str, int]]:
@@ -117,6 +118,7 @@ class WarehouseState(DomainModel):
     def validate_layout(self) -> Self:
         cells = (
             self.obstacles | self.blocked_cells | self.dropoff_locations
+            | set(self.parking_cells)
             | {robot.position for robot in self.robots}
             | {order.package.pickup for order in self.orders}
             | {order.dropoff for order in self.orders}
@@ -127,6 +129,11 @@ class WarehouseState(DomainModel):
             raise ValueError("Permanent obstacles and temporary blocked cells must be distinct")
         if self.obstacles & self.dropoff_locations:
             raise ValueError("Drop-off locations cannot be obstacles")
+        if len(set(self.parking_cells)) != len(self.parking_cells):
+            raise ValueError("Parking cells must be unique")
+        if set(self.parking_cells) & (self.obstacles | self.dropoff_locations |
+                                      {order.package.pickup for order in self.orders}):
+            raise ValueError("Parking cells cannot overlap shelves, pickups, or drop-offs")
 
         robot_ids = [robot.id for robot in self.robots]
         positions = [robot.position for robot in self.robots]

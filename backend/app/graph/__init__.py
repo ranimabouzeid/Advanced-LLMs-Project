@@ -1,1 +1,1 @@
-"""Shared workflow schemas; orchestration is not implemented yet."""
+"""Typed shared state and sequential batch orchestration with four distinct roles."""

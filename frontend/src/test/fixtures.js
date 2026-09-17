@@ -422,9 +422,8 @@ export const ready = {
   },
   "planning_outcome": "planned",
   "safety": {
-    "route_valid": true,
-    "collision_risk": false,
-    "reasons": [],
+    "approved": true,
+    "explanation": "Model approved the proposed delivery",
     "conflicts": []
   },
   "replan_count": 0,
@@ -859,9 +858,8 @@ export const replacement = {
   },
   "planning_outcome": "planned",
   "safety": {
-    "route_valid": true,
-    "collision_risk": false,
-    "reasons": [],
+    "approved": true,
+    "explanation": "Model approved the proposed delivery",
     "conflicts": []
   },
   "replan_count": 0,

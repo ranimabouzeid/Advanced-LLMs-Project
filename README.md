@@ -7,7 +7,12 @@ The current implementation contains Pydantic domain models and a deterministic
 cells, validated single-step movement, reusable deterministic A* route planning,
 assignment/pickup/delivery primitives, typed two-leg delivery validation, and atomic
 complete-delivery execution. Four LangGraph roles, PLAN/EXECUTE orchestration,
-process-local checkpointed sessions, and a thin FastAPI service are implemented.
+process-local checkpointed sessions, a thin FastAPI service, and a React dashboard are implemented.
+Plan builds a sequential batch using projected robot positions and batteries;
+Execute revalidates and applies approved deliveries. All four agents use one shared
+Groq client: Order selects orders, Fleet selects robots, Route supplies coordinates,
+and Safety approves or rejects. A* remains a standalone domain utility; agents do
+not use it. Deterministic simulation still guards actual execution.
 
 ## Run tests (Windows)
 
@@ -20,7 +25,15 @@ and [architecture and phase boundaries](AGENTS.md).
 
 See the [revised completion plan](plan.md) for the milestone sequence and future work.
 
-Milestones A–F are complete with 498 passing offline tests, including 76 API cases.
+The backend includes offline domain, role, batch, session, and API tests.
 See [API startup](docs/environment.md#milestone-f-api) and
 [API contract](docs/architecture.md#milestone-f-thin-fastapi-service).
-React and Milestone G remain unimplemented and require separate authorization.
+See [batch planning and execution](docs/architecture.md#sequential-multi-order-batch-planning-current-workflow)
+for state ownership, partial failure policy, and the route selector.
+
+Current ALL-LLM verification: **507 backend tests and 53 frontend tests pass**;
+frontend build, pip check, and git diff --check pass. Earlier counts above are
+historical. Model decisions are mocked in tests; no live call was made. LLM routes
+can be suboptimal or invalid and Safety can make mistakes; deterministic execution
+may reject a model-approved plan. See the current workflow architecture for retry,
+review, projection, and partial-commit behavior.

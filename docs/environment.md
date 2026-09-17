@@ -114,3 +114,25 @@ Process environment values override `.env`. Offline pytest never invokes this sc
 Groq migration verification: 499 offline tests passed with the existing Starlette
 warning. Installed langchain-groq 1.1.3 and groq 0.37.1; `pip check` passed.
 Dependencies remain unpinned. No live Groq request was made during verification.
+
+
+## ALL-LLM batch workflow verification
+
+The ALL-LLM batch workflow passes 507 offline backend tests and 53 frontend tests.
+The Vite production build and `pip check` pass. The backend still reports the
+existing Starlette BlockingPortal deprecation warning. Groq calls remain mocked.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pip check
+npm.cmd --prefix frontend test -- --run
+npm.cmd --prefix frontend run build
+git diff --check
+```
+
+All four roles share the existing ChatGroq factory and settings. No additional
+dependencies or environment variables are required for this migration.
+The optional live smoke script checks OrderSelection connectivity; it does not
+certify the quality of Fleet, Route, or Safety decisions.
+The in-memory session/checkpoint store is process-local; restart the backend after
+code changes. Sessions do not persist across process restarts.

@@ -46,3 +46,66 @@ it('supports keyboard cell selection without mutation', async () => {
   screen.getByRole('button',{name:/Cell \(5, 0\)/}).focus(); await userEvent.keyboard('{Enter}');
   expect(select).toHaveBeenCalledWith({x:5,y:0});
 });
+
+it('selects each batch route in order without marking projected revisions stale', async () => {
+  const s = structuredClone(ready);
+  s.batch_revision = s.warehouse.revision;
+  s.planned_deliveries = [
+    { order_id: 'o', robot_id: 'robot-1', status: 'approved', delivery_plan: s.delivery_plan },
+    { order_id: 'second', robot_id: 'robot-2', status: 'approved', delivery_plan: {
+      ...s.delivery_plan, warehouse_revision: s.warehouse.revision + 1,
+      pickup_route: [{ x: 0, y: 1 }, { x: 1, y: 1 }],
+    } },
+  ];
+  draw(s);
+  const selector = screen.getByRole('combobox', { name: 'Delivery route' });
+  expect(selector).toHaveValue('o');
+  expect(screen.getByRole('option', { name: /2. second.*robot-2/ })).toBeVisible();
+  await userEvent.selectOptions(selector, 'second');
+  expect(screen.getByTestId('pickup-route').querySelector('polyline')).toHaveAttribute('points', '0.5,1.5 1.5,1.5');
+  expect(screen.queryByText(/Stale route/)).not.toBeInTheDocument();
+  expect(s.warehouse).toEqual(ready.warehouse);
+});
+
+it('marks invalidated batch routes stale and falls back when a selected order disappears', async () => {
+  const s = structuredClone(ready);
+  s.batch_revision = s.warehouse.revision;
+  s.planned_deliveries = ['first', 'second'].map(order_id => ({
+    order_id, robot_id: 'robot-1', status: 'stale', delivery_plan: s.delivery_plan,
+  }));
+  const { rerender } = draw(s);
+  await userEvent.selectOptions(screen.getByLabelText('Delivery route'), 'second');
+  s.planned_deliveries = s.planned_deliveries.slice(0, 1);
+  rerender(<WarehouseGrid state={s} onSelect={() => {}} />);
+  expect(screen.getByLabelText('Delivery route')).toHaveValue('first');
+  expect(screen.getByText(/Stale route/)).toBeVisible();
+});
+
+it('labels staging cells and draws parking only after the robot final assignment', async () => {
+  const s = structuredClone(ready);
+  s.warehouse.parking_cells = [{ x: 7, y: 9 }, { x: 8, y: 9 }, { x: 8, y: 8 }];
+  s.batch_revision = s.warehouse.revision;
+  s.planned_deliveries = ['first', 'last'].map(order_id => ({
+    order_id, robot_id: 'robot-1', status: 'approved', delivery_plan: s.delivery_plan,
+  }));
+  s.robot_schedules = [{ robot_id: 'robot-1', order_ids: ['first', 'last'], parking: {
+    status: 'approved', plan: { route: [{ x: 9, y: 0 }, { x: 7, y: 9 }] },
+  } }];
+  draw(s);
+  expect(screen.getByRole('button', { name: /Cell \(7, 9\).*parking P1/ })).toBeVisible();
+  expect(screen.getByRole('button', { name: /Cell \(8, 9\).*parking P2/ })).toBeVisible();
+  expect(screen.getByRole('button', { name: /Cell \(8, 8\).*parking P3/ })).toBeVisible();
+  expect(screen.queryByTestId('parking-route')).not.toBeInTheDocument();
+  await userEvent.selectOptions(screen.getByLabelText('Delivery route'), 'last');
+  expect(screen.getByTestId('parking-route').querySelector('polyline')).toHaveAttribute('points', '9.5,0.5 7.5,9.5');
+});
+
+it('draws a parking-only recovery proposal', () => {
+  const s = structuredClone(initial);
+  s.robot_schedules = [{ robot_id: 'robot-1', order_ids: [], parking: {
+    plan: { route: [{ x: 9, y: 0 }, { x: 7, y: 9 }] }, status: 'approved',
+  } }];
+  draw(s);
+  expect(screen.getByTestId('parking-route')).toBeVisible();
+  expect(screen.queryByTestId('pickup-route')).not.toBeInTheDocument();
+});

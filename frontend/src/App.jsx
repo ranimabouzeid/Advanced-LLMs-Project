@@ -19,9 +19,10 @@ export default function App() {
     {httpError && <div className="notice error" role="alert"><strong>{unavailable ? 'Session unavailable' : httpError.status === 409 ? 'Session busy' : 'Request could not be completed'}</strong><p>{httpError.message}</p>
       {(unavailable || !session) && <button disabled={busy} onClick={() => run('createSession')}>Create fresh session</button>}
       {uncertain && session && <p>Use Refresh state to reconcile the committed result. No automatic retry was made.</p>}</div>}
+    {lastCommand?.outcome === 'partial' && <div className="notice" role="status"><strong>Batch partially delivered</strong><p>Completed deliveries are saved. Review the per-order results, then Plan the remaining orders.</p></div>}
     {lastCommand?.outcome === 'failed' && <div className="notice error" role="alert"><strong>Command rejected</strong><p>{lastCommand.error?.message || 'The attempted command failed. The committed state is shown below.'}</p></div>}
-    {replacementNotice !== null && <div className="notice replacement" role="status"><strong>Replacement route - review required</strong><p>Warehouse conditions changed. A replacement route was generated and has not been executed. Review it, then press Execute again.</p></div>}
-    {session && <><div className="workspace"><div className="main-column"><WarehouseGrid state={session.state} selectedCell={selectedCell} onSelect={setSelectedCell} /><RobotPanel state={session.state} /><OrdersPanel orders={session.state.warehouse.orders} /></div>
+    {replacementNotice !== null && <div className="notice replacement" role="status"><strong>Replacement route - review required</strong><p>The proposal required replanning. A replacement route was generated and has not been executed. Review it, then press Execute again.</p></div>}
+    {session && <><div className="workspace"><div className="main-column"><WarehouseGrid state={session.state} selectedCell={selectedCell} onSelect={setSelectedCell} /><RobotPanel state={session.state} /><OrdersPanel orders={session.state.warehouse.orders} plannedDeliveries={session.state.planned_deliveries} /></div>
       <aside><ControlsPanel key={session.session_id} state={session.state} selectedCell={selectedCell} busy={busy} unavailable={unavailable || uncertain} run={run} />
         <StatePanel state={session.state} lastCommand={lastCommand} /><AgentActivity activity={session.state.node_activity} /></aside></div></>}
     <footer>Sequential simulation | Server-authoritative state | No live motion or agent stream</footer>

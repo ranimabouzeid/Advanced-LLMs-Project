@@ -60,7 +60,7 @@ def test_plan_persistence_and_execute_continuity(coordinator):
     delivered = coordinator.execute(sid)
     assert delivered.run_outcome == "delivered"
     assert coordinator.get_state(sid) == delivered
-    assert delivered.warehouse.revision == before.warehouse.revision + 1
+    assert delivered.warehouse.revision == before.warehouse.revision + 2
     assert delivered.delivery_plan is delivered.order_selection is delivered.safety is None
 
 
@@ -152,7 +152,7 @@ def test_failed_intermediate_hidden_and_next_command_uses_commit(coordinator, mo
 
     monkeypatch.setattr(coordinator._graph, "invoke", checked)
     assert coordinator.plan(sid).run_outcome == "ready"
-    assert len(coordinator.get_state(sid).node_activity) == 4
+    assert len(coordinator.get_state(sid).node_activity) == 8
 
 
 def test_model_failure_does_not_commit(coordinator):
@@ -240,17 +240,16 @@ def test_invalid_mutation_atomic_and_lock_released(coordinator, mutation):
     assert coordinator.plan(sid).run_outcome == "ready"
 
 
-def test_duplicate_execute_no_movement_cost_completion_or_other_order_change(coordinator):
+def test_duplicate_execute_does_not_repeat_batch_deliveries(coordinator):
     sid = prepared(coordinator)
-    with_other = order(coordinator, sid, "other")
-    unrelated = with_other.warehouse.orders[1]
+    order(coordinator, sid, "other")
     coordinator.plan(sid)
     delivered = coordinator.execute(sid)
     for _ in range(2):
         with pytest.raises(SessionExecutionError):
             coordinator.execute(sid)
         assert coordinator.get_state(sid) == delivered
-    assert delivered.warehouse.orders[1] == unrelated
+    assert delivered.warehouse.orders[1].status.value == "delivered"
     assert delivered.warehouse.orders[0].status.value == "delivered"
 
 
@@ -312,7 +311,7 @@ def test_failed_execute_after_delivery_checkpoint_can_retry_once(coordinator, mo
     assert coordinator.get_state(sid) == ready
     assert coordinator._graph.get_state({"configurable": {"thread_id": sid}}).values["run_outcome"] == "delivered"
     delivered = coordinator.execute(sid)
-    assert delivered.warehouse_revision == ready.warehouse_revision + 1
+    assert delivered.warehouse_revision == ready.warehouse_revision + 2
     assert delivered.run_outcome == "delivered"
     with pytest.raises(SessionExecutionError):
         coordinator.execute(sid)

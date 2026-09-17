@@ -3,7 +3,7 @@
 import pytest
 from langgraph.graph import END, START, StateGraph
 
-from app.graph.state import NodeActivity, OrderSelection, WarehouseGraphState
+from app.graph.state import SafetyDecision, NodeActivity, OrderSelection, WarehouseGraphState
 from app.graph.updates import (
     fresh_plan, is_plan_approved, record_safety, replan, replace_warehouse,
     select_order, select_robot,
@@ -37,7 +37,7 @@ def planned(initial):
 
 def approved(initial):
     state = planned(initial)
-    return merge(state, record_safety(state, validate_delivery_plan(state.warehouse, state.delivery_plan)))
+    return merge(state, record_safety(state, SafetyDecision(approved=True, explanation="Mock approval")))
 
 
 def test_compiled_graph_partial_update_evolution(initial):
@@ -65,7 +65,7 @@ def test_compiled_graph_partial_update_evolution(initial):
         lambda s: select_order(s, OrderSelection(order_id="o", explanation="First pending")),
         lambda s: select_robot(s, "robot-1"),
         lambda s: fresh_plan(s, plan_delivery(s.warehouse, "o", "robot-1")),
-        lambda s: record_safety(s, validate_delivery_plan(s.warehouse, s.delivery_plan)),
+        lambda s: record_safety(s, SafetyDecision(approved=True, explanation="Mock approval")),
         mutate,
         lambda s: replan(s, plan_delivery(s.warehouse, "o", "robot-1")),
         lambda s: fresh_plan(s, plan_delivery(s.warehouse, "o", "robot-1")),
@@ -110,7 +110,7 @@ def test_selection_invalidates_dependents(initial, kind):
     assert result.replan_count == 0 and not result.execution_requested
     assert result.planning_outcome == "not_planned" and result.run_outcome != "ready"
     assert "warehouse" not in patch
-    assert state.safety.route_valid and state.replan_count == 2
+    assert state.safety.approved and state.replan_count == 2
     if kind == "order":
         assert result.selected_robot_id is None
     else:
@@ -150,8 +150,8 @@ def test_stale_approval_cannot_pass_even_if_supplied_directly(initial):
     temporary.add_blocked_cell(Position(x=8, y=8))
     stale = merge(state, {"warehouse": temporary.state})
     assert not is_plan_approved(stale)
-    with pytest.raises(ValueError, match="deterministic validation"):
-        record_safety(stale, state.safety)
+    assert record_safety(stale, state.safety)["safety"] == state.safety
+    assert not is_plan_approved(stale)  # revision guard is independent of model approval
     with pytest.raises(ValueError, match="current warehouse revision"):
         fresh_plan(stale, state.delivery_plan)
 
@@ -170,8 +170,8 @@ def test_safety_rejection_and_missing_dependencies(initial):
     temporary = WarehouseSimulation(state.warehouse)
     temporary.add_blocked_cell(Position(x=5, y=0))
     stale = merge(state, replace_warehouse(state, temporary.state))
-    rejected = merge(stale, record_safety(stale, validate_delivery_plan(stale.warehouse, stale.delivery_plan)))
-    assert rejected.safety is not None and not rejected.safety.route_valid
+    rejected = merge(stale, record_safety(stale, SafetyDecision(approved=False, conflicts=("Stale proposal",), explanation="Mock rejection")))
+    assert rejected.safety is not None and not rejected.safety.approved
     assert rejected.run_outcome == "failed" and not is_plan_approved(rejected)
 
 

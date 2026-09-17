@@ -663,3 +663,143 @@ One installed Starlette/AnyIO deprecation warning remains; no tests failed and n
 warnings were suppressed. Live provider calls were not performed. Sessions remain
 process-local RAM only, lost on restart. No database, authentication, deployment,
 React or Milestone G functionality was added.
+
+
+## Sequential multi-order batch planning (current workflow)
+
+This section supersedes the historical deterministic agent and single-proposal
+milestones above. The authorized ALL-LLM migration retains batch planning,
+LangGraph, checkpointing, SessionCoordinator, API endpoints, and simulation.
+
+### Shared client and agent contracts
+
+The application constructs one ChatGroq through `create_model_client()` and injects
+it through SessionCoordinator and build_graph into all four roles. There are no
+clients in shared state or individual nodes. Every decision uses
+`structured_output(client, Schema)` with `method="function_calling"`, separate
+SystemMessage/HumanMessage prompts, and Pydantic validation. Provider errors are
+sanitized. Tools retrieve trusted warehouse records; they do not decide outcomes.
+
+| Role | Structured response | Responsibility |
+| --- | --- | --- |
+| Order | OrderSelection | Select any remaining pending order and explain why |
+| Fleet | FleetSelection | Choose a robot using all robot records and warehouse context; null reports no suitable robot |
+| Route | LLMRoutePlan | Supply both complete coordinate sequences, or explicitly report unreachable |
+| Safety | SafetyDecision | Approve/reject, with conflict strings and an explanation |
+
+Basic checks reject invented IDs, unavailable robots, mismatched route IDs,
+out-of-grid coordinates, empty route legs, and malformed responses. Route geometry
+is preserved exactly as the model supplied it; total_steps is its edge count.
+Fleet no longer computes minimum-cost assignments; Route does not call A* or
+plan_delivery; Safety and update helpers do not call validate_delivery_plan.
+Safety approval is the model's decision, not a deterministic safety certificate.
+
+### State and batch projection
+
+`planned_deliveries` is an immutable sequence of PlannedDelivery records containing
+order_id, selection, robot_id, delivery_plan, SafetyDecision, status, and reason.
+Statuses are approved, unplannable, stale, delivered, failed, and not_executed.
+Schemas reject duplicate orders, mismatched identifiers, and approvals without a
+plan and an approving SafetyDecision. The active single-order fields summarize
+the first approved delivery on READY; the batch sequence controls execution.
+
+`warehouse` is the committed real snapshot. `batch_revision` identifies its input
+revision. Private projected_warehouse, planning_queue, and planning_index channels
+support sequential planning and are cleared on completion. Each Order decision
+chooses from the remaining pending IDs, so a model can change creation order.
+Unplannable orders receive a reason and are not retried within that planning pass.
+
+After model approval, projection assumes delivery success and derives the robot's
+new position, battery, availability, order status, and next revision. It validates
+WarehouseState data constraints, including nonnegative battery and valid occupancy.
+It neither executes movement nor validates route geometry. These hypothetical
+records inform the next Fleet/Route/Safety calls and never replace real warehouse
+state during Plan. Operational/model/schema failures preserve the previous session
+commit rather than publish an incomplete plan.
+
+### Conditional flow and review
+
+```mermaid
+flowchart LR
+    Plan --> Order --> Fleet --> Route --> Safety
+    Safety -->|Approved| Collect[Record and project]
+    Safety -->|Rejected, budget available| Retry[Retry Route with feedback] --> Route
+    Safety -->|Rejected, exhausted| Skip[Record unplannable] --> Collect
+    Collect -->|Remaining orders| Order
+    Collect -->|Finished| Ready[Review batch]
+    Execute --> Check[Safety reviews entire batch]
+    Check -->|All approved, current revision| Execution
+    Check -->|Stale revision| Replan[Clear intent and rebuild batch] --> Order
+    Check -->|Rejected| Retry
+```
+
+Safety rejection supplies the previous route and structured feedback to Route.
+Each retry consumes the shared max_replans budget (0-3). Repeating the rejected
+coordinates fails cleanly. Exhausted rejection records the order as unplannable;
+other approved orders may still form a READY batch. If none are approved, the
+command fails. Malformed output/provider failures do not retry through this edge.
+
+Execute runs Safety on the sequential projection before any real delivery. A
+revision mismatch remains an independent data-integrity guard even if the model
+approves. Stale replacement rebuilds the batch. A non-stale Safety rejection keeps
+the reviewed prefix, retries that route, and rebuilds the dependent suffix.
+Both replacement paths clear execution intent and return proposals for review;
+another explicit Execute is required. A fresh Plan resets the retry budget.
+
+### Execution and checkpoint policy
+
+WarehouseSimulation.execute_delivery still performs deterministic route validation,
+checks battery, obstacles, adjacency, endpoints and occupancy, and atomically
+applies each approved delivery. An incorrect LLM approval cannot bypass these
+execution checks. The warehouse package, including its reusable A* implementation,
+is unchanged; A* is not in the application's agent decision path.
+
+Successful deliveries advance revision once each. A typed domain failure records
+failed, stops the dependent suffix as not_executed, and retains the completed
+prefix. The outcome is partial if any delivery completed, otherwise failed.
+Consumed records cannot execute twice. A new Plan addresses remaining orders.
+Unexpected execution or checkpoint exceptions preserve the prior committed state
+for the whole command. Movement is simulated in memory with no external side effects.
+
+SessionCoordinator retains one saver, per-session guards, private committed
+checkpoint references, and serializer support for PlannedDelivery/SafetyDecision.
+API endpoints and response envelopes are unchanged. The nested safety shape is now
+`{approved, conflicts, explanation}`; the dashboard displays those fields, batch
+assignments/results, and one selected route at a time. Robot positions always show
+the committed warehouse, even when a later route starts from a projected position.
+
+### Verification and limitations
+
+Offline tests script all four model responses, including non-minimum Fleet choices,
+model-authored detours, incorrect Safety approval, rejection feedback, bounded
+retries, review-only replacement, partial execution, and checkpoint isolation.
+The shared fake can generate canned responses using domain functions for existing
+integration fixtures; these are test-only helpers, not production decisions.
+ChatGroq function-call parsing is tested offline for all four Pydantic schemas.
+
+Fleet request regression tests also intercept the real ChatGroq completion boundary
+with fully scripted responses (no automatic routing/ranking fake). They verify two
+separate Fleet calls, all three robots in each payload, projected position/battery,
+cleared per-order fields, and both changed and repeated robot selections, with and
+without session checkpointing. The `app.graph.batch` logger emits an INFO record
+per Fleet decision with order ID, input revision, robot tuples
+`(id, x, y, battery, status)`, selected ID, and outcome; it excludes prompts,
+credentials, and provider errors. Enable INFO for this logger in the server's
+logging configuration when investigating live choices.
+
+Shared drop-offs can legitimately force repeated robot assignments: for orders
+`(4,2) -> (9,0)` and `(1,4) -> (9,0)`, the first robot remains at `(9,0)` in the
+projection. Another robot cannot deliver into that occupied cell. The occupant can
+leave for the second pickup and return. A regression test verifies that projection
+matches actual execution and that a different robot's attempted delivery is rejected.
+Using multiple robots for this case would require an explicitly designed departure
+or parking operation; resetting the projection or ignoring occupancy is not valid.
+
+LLM routes may be invalid or suboptimal; Safety may approve incorrectly or reject
+valid routes. Domain execution can therefore reject a model-approved batch.
+Planning normally needs four Groq calls per considered delivery and Execute needs
+another Safety call per approved delivery; retries add calls and latency. There
+is no guaranteed optimal scheduling or route quality. Motion remains sequential,
+with no automatic parking, charging, or concurrent time-expanded routing. The
+10,000-step graph limit guards exceptionally large batches. Sessions remain
+process-local and are lost on restart. No live Groq call is part of pytest.

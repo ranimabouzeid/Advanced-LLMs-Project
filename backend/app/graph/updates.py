@@ -7,18 +7,25 @@ No helper mutates state, runs an agent, or commits movement.
 from typing import Literal, TypedDict
 
 from app.warehouse.models import DeliveryPlan, OrderStatus, WarehouseState
-from app.warehouse.validation import ValidationResult, validate_delivery_plan
 
-from .state import NodeActivity, OrderSelection, PlanningOutcome, RunOutcome, WarehouseGraphState
+from .state import NodeActivity, OrderSelection, PlannedDelivery, SafetyDecision, PlanningOutcome, RunOutcome, WarehouseGraphState
+from .state import RobotForecast, RobotSchedule
 
 
 class StateUpdate(TypedDict, total=False):
+    robot_forecasts: tuple[RobotForecast, ...]
+    robot_schedules: tuple[RobotSchedule, ...]
+    planned_deliveries: tuple[PlannedDelivery, ...]
+    batch_revision: int | None
+    projected_warehouse: WarehouseState | None
+    planning_queue: tuple[str, ...]
+    planning_index: int
     warehouse: WarehouseState
     order_selection: OrderSelection | None
     selected_robot_id: str | None
     delivery_plan: DeliveryPlan | None
     planning_outcome: PlanningOutcome
-    safety: ValidationResult | None
+    safety: SafetyDecision | None
     replan_count: int
     execution_requested: bool
     run_outcome: RunOutcome
@@ -98,6 +105,16 @@ def replace_warehouse(state: WarehouseGraphState, warehouse: WarehouseState) -> 
     update: StateUpdate = dict(warehouse=warehouse, safety=None, execution_requested=False,
                                error_message=None, run_outcome="idle",
                                planning_outcome="stale" if state.delivery_plan else "not_planned")
+    update.update(projected_warehouse=None, planning_queue=(), planning_index=0,
+                  robot_forecasts=(),
+                  robot_schedules=tuple(RobotSchedule.model_validate({**s.model_dump(),
+                      "parking": {**s.parking.model_dump(), "status": "stale", "safety": None,
+                                  "reason": "Warehouse changed"}}) if s.parking.status == "approved" else s
+                      for s in state.robot_schedules),
+                  planned_deliveries=tuple(
+                      PlannedDelivery.model_validate({**item.model_dump(), "status": "stale",
+                          "safety": None, "reason": "Warehouse changed; batch requires revalidation"})
+                      if item.status == "approved" else item for item in state.planned_deliveries))
     if state.order_selection is not None and not any(
         order.id == state.order_selection.order_id and order.status == OrderStatus.PENDING
         for order in warehouse.orders
@@ -130,7 +147,7 @@ def fresh_plan(state: WarehouseGraphState, plan: DeliveryPlan) -> StateUpdate:
 
 def route_result(state: WarehouseGraphState, *, plan: DeliveryPlan | None = None,
                  outcome: Literal["planned", "unreachable", "failed"],
-                 error: str | None = None) -> StateUpdate:
+                 error: str | None = None, explanation: str | None = None) -> StateUpdate:
     """Publish one fresh planning attempt, never safety approval or movement."""
     if (outcome == "planned") != (plan is not None):
         raise ValueError("Planned outcome requires a delivery plan")
@@ -138,8 +155,8 @@ def route_result(state: WarehouseGraphState, *, plan: DeliveryPlan | None = None
         raise ValueError("Failed planning requires an error")
     update = fresh_plan(state, plan) if plan is not None else _clear_proposal()
     record = NodeActivity(node="route", status="failed" if outcome == "failed" else "completed",
-                          message=error or ("Two-leg A* plan calculated" if plan is not None
-                                           else "Pickup or drop-off is unreachable"))
+                          message=error or explanation or ("LLM route proposed" if plan is not None
+                                           else "Model reports pickup or drop-off unreachable"))
     update.update(planning_outcome=outcome,
                   run_outcome="running" if outcome == "planned" else outcome,
                   error_message=error, node_activity=(*state.node_activity, record))
@@ -159,55 +176,37 @@ def replan(state: WarehouseGraphState, plan: DeliveryPlan) -> StateUpdate:
     return _plan_update(state, plan, state.replan_count + 1)
 
 
-def record_safety(state: WarehouseGraphState, result: ValidationResult) -> StateUpdate:
-    """Safety publishes findings only if they match this snapshot and proposal."""
+def record_safety(state: WarehouseGraphState, result: SafetyDecision) -> StateUpdate:
+    """Store the structured model decision without invoking a deterministic validator."""
     if state.delivery_plan is None:
         raise ValueError("Safety requires a proposal")
-    expected = validate_delivery_plan(state.warehouse, state.delivery_plan)
-    if result != expected:
-        raise ValueError("Safety result does not match current deterministic validation")
-    return _validated(state, dict(safety=expected, run_outcome="ready" if expected.route_valid else "failed",
-                                 error_message=None if expected.route_valid else "Delivery plan failed validation"))
+    result = SafetyDecision.model_validate(result.model_dump())
+    return _validated(state, dict(safety=result, run_outcome="ready" if result.approved else "failed",
+                                 error_message=None if result.approved else result.explanation))
 
 
-def safety_result(state: WarehouseGraphState, *, result: ValidationResult | None = None,
-                  error: str | None = None, summary: str | None = None,
-                  discard_plan: bool = False) -> StateUpdate:
-    """Safety owns findings/diagnostics; rejection or failure revokes execution intent."""
+def safety_result(state: WarehouseGraphState, *, result: SafetyDecision | None = None,
+                  error: str | None = None) -> StateUpdate:
     if result is None and error is None:
-        raise ValueError("Safety requires findings or an explicit failure")
-    if discard_plan and result is not None:
-        raise ValueError("Cannot publish findings for a discarded plan")
+        raise ValueError("Safety requires a decision or an explicit failure")
     update = (record_safety(state, result) if result is not None else
               dict(safety=None, run_outcome="failed", error_message=error))
-    if error is not None:
-        update.update(run_outcome="failed", error_message=error)
-    if result is None or not result.route_valid or error is not None:
+    if error is not None or result is None or not result.approved:
         update["execution_requested"] = False
-    if discard_plan:
-        update.update(delivery_plan=None, planning_outcome="failed")
-    status = "failed" if error else "completed" if result.route_valid else "rejected"
-    message = error or ("Deterministic plan approved" if result.route_valid else "Deterministic plan rejected")
-    if summary:
-        message = (message + "; model summary (non-authoritative): " + summary)[:300]
-    update["node_activity"] = (*state.node_activity, NodeActivity(node="safety", status=status, message=message))
+    status = "failed" if error else "completed" if result.approved else "rejected"
+    update["node_activity"] = (*state.node_activity, NodeActivity(
+        node="safety", status=status, message=error or result.explanation))
     return _validated(state, update)
 
 
 def is_plan_approved(state: WarehouseGraphState) -> bool:
-    """Derived approval, not execution permission or another stored safety flag.
-
-    Future execution must additionally require intent and revalidate immediately
-    before committing. Runtime validation prevents forged or mismatched approval.
-    """
+    """Check model approval and proposal identity; execution retains its own checks."""
     plan = state.delivery_plan
     return bool(plan is not None and state.order_selection is not None
                 and plan.order_id == state.order_selection.order_id
                 and plan.robot_id == state.selected_robot_id
                 and plan.warehouse_revision == state.warehouse_revision
-                and state.safety is not None and state.safety.route_valid
-                and not state.safety.collision_risk
-                and validate_delivery_plan(state.warehouse, plan) == state.safety)
+                and state.safety is not None and state.safety.approved)
 
 
 def retry_result(state: WarehouseGraphState, result: StateUpdate) -> StateUpdate:

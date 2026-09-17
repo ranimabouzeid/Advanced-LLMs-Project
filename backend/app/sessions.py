@@ -14,7 +14,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.graph.graph import build_graph
-from app.graph.state import NodeActivity, OrderSelection, WarehouseGraphState
+from app.graph.state import NodeActivity, OrderSelection, PlannedDelivery, SafetyDecision, WarehouseGraphState
+from app.graph.state import RobotForecast, RobotSchedule, PlannedParking
+from app.warehouse.movement import MovementPlan
 from app.graph.updates import replace_warehouse
 from app.warehouse import (
     DeliveryPlan, Order, OrderStatus, Package, Position, Robot, RobotConflict,
@@ -51,7 +53,8 @@ class SessionCommandRejected(SessionExecutionError):
 
     def __init__(self, state: WarehouseGraphState):
         self.code: Literal["missing_proposal", "consumed_proposal"] = (
-            "consumed_proposal" if state.run_outcome == "delivered" else "missing_proposal")
+            "consumed_proposal" if any(item.status in ("delivered", "failed", "not_executed")
+                                       for item in state.planned_deliveries) else "missing_proposal")
         self.message = "No delivery proposal is available; plan before executing"
         self.state = state
         super().__init__(self.message)
@@ -78,7 +81,8 @@ class SessionCoordinator:
 
     def __init__(self, *, client: BaseChatModel):
         serializer = JsonPlusSerializer(pickle_fallback=False, allowed_msgpack_modules=[
-            WarehouseGraphState, OrderSelection, NodeActivity, WarehouseState,
+            WarehouseGraphState, OrderSelection, PlannedDelivery, SafetyDecision, NodeActivity, WarehouseState,
+            RobotForecast, RobotSchedule, PlannedParking, MovementPlan,
             DeliveryPlan, ValidationResult, ValidationIssue, RobotConflict,
             Order, OrderStatus, Package, Position, Robot, RobotStatus,
         ])
@@ -145,7 +149,9 @@ class SessionCoordinator:
     def _command(self, session_id: str, command: str) -> WarehouseGraphState:
         with self._guard(session_id) as entry:
             state = self._read(entry.committed)[1]
-            if command == "execute" and state.delivery_plan is None:
+            if command == "execute" and not any(
+                item.status in ("approved", "stale") for item in state.planned_deliveries
+            ) and not any(s.parking.status in ("approved", "stale") for s in state.robot_schedules):
                 raise SessionCommandRejected(state)
             inputs = {**state.model_dump(), "command": command, "execution_requested": False}
             self._graph.invoke(inputs, deepcopy(entry.committed), durability="sync")

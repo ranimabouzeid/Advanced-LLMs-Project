@@ -1,138 +1,87 @@
-"""Sequential command workflow with optional checkpointing."""
+"""Sequential batch graph; role nodes communicate only through typed shared state."""
 
 from functools import partial
-from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
 
-from app.warehouse import DeliveryPlan, WarehouseSimulation
-from .agents import order_agent, fleet_agent, route_agent, safety_agent
+from . import batch
+from .schedules import finalize
 from .state import WarehouseGraphState
 from .tools import OrderTools, FleetTools, RouteTools, SafetyTools
-from .updates import StateUpdate, execution_result, is_plan_approved, retry_result, workflow_failure
-
-
-class CommandInput(WarehouseGraphState):
-    """Only the proposal is permissive at entry so malformed input can fail safely.
-
-    All subsequent nodes use the strict WarehouseGraphState schema.
-    """
-
-    delivery_plan: Any = None
-
-
-def dispatch(state: CommandInput) -> StateUpdate:
-    if state.delivery_plan is not None:
-        try:
-            raw = state.delivery_plan
-            DeliveryPlan.model_validate(raw.model_dump() if isinstance(raw, DeliveryPlan) else raw)
-        except Exception:
-            return dict(delivery_plan=None, safety=None, planning_outcome="failed",
-                        execution_requested=False, run_outcome="failed",
-                        error_message="Malformed delivery plan")
-    # Only this entry point establishes intent; replacement planning clears it.
-    return dict(execution_requested=state.command == "execute", safety=None,
-                error_message=None, run_outcome="running")
 
 
 def after_dispatch(state: WarehouseGraphState) -> str:
-    if state.run_outcome == "failed":
-        return END
     return "order" if state.command == "plan" else "safety"
 
 
 def after_order(state: WarehouseGraphState) -> str:
-    return "fleet" if state.run_outcome == "running" and state.order_selection is not None else END
+    if state.run_outcome == "no_work":
+        return "finish"
+    return "fleet" if state.run_outcome == "running" else "failure"
 
 
 def after_fleet(state: WarehouseGraphState) -> str:
-    return "route" if state.run_outcome == "running" and state.selected_robot_id is not None else END
+    if state.run_outcome == "no_robot":
+        return "collect"
+    return "route" if state.run_outcome == "running" else "failure"
 
 
 def after_route(state: WarehouseGraphState) -> str:
-    return "safety" if state.planning_outcome == "planned" and state.run_outcome == "running" else END
-
-
-def actionable_change(state: WarehouseGraphState) -> bool:
-    """Only a newer snapshot and routing-related rejection justify another A*."""
-    plan, result = state.delivery_plan, state.safety
-    return bool(plan is not None and result is not None and not result.route_valid
-                and plan.warehouse_revision < state.warehouse_revision
-                and state.order_selection is not None
-                and plan.order_id == state.order_selection.order_id
-                and plan.robot_id == state.selected_robot_id
-                and {issue.code for issue in result.reasons}
-                <= {"stale_plan", "blocked", "obstacle", "wrong_start"})
+    if state.run_outcome == "unreachable":
+        return "collect"
+    return "safety" if state.run_outcome == "running" else "failure"
 
 
 def after_safety(state: WarehouseGraphState) -> str:
-    if not state.node_activity or state.node_activity[-1].node != "safety":
+    if state.node_activity and state.node_activity[-1].status == "failed":
         return "failure"
-    status = state.node_activity[-1].status
-    if status == "failed":
-        return "failure"
-    if status == "completed" and state.run_outcome == "ready" and is_plan_approved(state):
-        return "execution" if state.command == "execute" and state.execution_requested else END
-    if status == "rejected" and actionable_change(state) and state.replan_count < state.max_replans:
-        return "retry_route"
+    if state.projected_warehouse is not None:
+        if state.safety is not None and not state.safety.approved:
+            return "retry_route" if state.replan_count < state.max_replans else "collect"
+        return "collect"
+    if state.run_outcome == "ready" and state.execution_requested:
+        return "execution"
+    if state.planning_outcome == "stale" and state.replan_count < state.max_replans:
+        return "replan"
     return "failure"
 
 
-def failure(state: WarehouseGraphState) -> StateUpdate:
-    if state.node_activity and state.node_activity[-1].status == "failed":
-        message = state.error_message or "Workflow operation failed"
-    elif actionable_change(state) and state.replan_count >= state.max_replans:
-        message = "Replan limit exhausted"
-    else:
-        message = state.error_message or "Safety approval missing or rejection is not replannable"
-    return workflow_failure(state, message)
-
-
-def retry_route(state: WarehouseGraphState, *, tools: RouteTools | None = None) -> StateUpdate:
-    # Guard direct invocation too. No tool runs for an unadmitted attempt.
-    if after_safety(state) != "retry_route":
-        return failure(state)
-    return retry_result(state, route_agent(state, tools=tools))
-
-
-def execution(state: WarehouseGraphState) -> StateUpdate:
-    try:
-        if (state.command != "execute" or not state.execution_requested
-                or state.run_outcome != "ready" or not is_plan_approved(state)):
-            return execution_result(state, error="Execution requires current deterministic approval and intent")
-        result = WarehouseSimulation(state.warehouse).execute_delivery(state.delivery_plan)
-        if not result.success:
-            return execution_result(state, error=f"Atomic delivery failed during {result.failed_stage}")
-        return execution_result(state, warehouse=result.final_state)
-    except Exception:
-        return execution_result(state, error="Atomic delivery failed")
+def after_collect(state: WarehouseGraphState) -> str:
+    return "order" if state.planning_index < len(state.planning_queue) else "finish"
 
 
 def build_graph(*, client: BaseChatModel, order_tools: OrderTools | None = None,
                 fleet_tools: FleetTools | None = None, route_tools: RouteTools | None = None,
-                safety_tools: SafetyTools | None = None, fleet_model: bool = False,
-                safety_model: bool = False, checkpointer=None):
-    """Compile with one injected shared client; optional roles reuse that client."""
-    graph = StateGraph(WarehouseGraphState, input_schema=CommandInput)
-    graph.add_node("dispatch", dispatch, input_schema=CommandInput)
-    graph.add_node("order", partial(order_agent, client=client, tools=order_tools))
-    graph.add_node("fleet", partial(fleet_agent, client=client if fleet_model else None, tools=fleet_tools))
-    graph.add_node("route", partial(route_agent, tools=route_tools))
-    graph.add_node("retry_route", partial(retry_route, tools=route_tools))
-    graph.add_node("safety", partial(safety_agent, client=client if safety_model else None, tools=safety_tools))
-    graph.add_node("execution", execution)
-    graph.add_node("failure", failure)
+                safety_tools: SafetyTools | None = None, checkpointer=None):
+    """One shared client, one saver, distinct roles, finite model-selected order loop."""
+    graph = StateGraph(WarehouseGraphState)
+    graph.add_node("dispatch", batch.dispatch)
+    graph.add_node("order", partial(batch.order, client=client, tools=order_tools))
+    graph.add_node("fleet", partial(batch.fleet, client=client, tools=fleet_tools))
+    graph.add_node("route", partial(batch.route, client=client, tools=route_tools))
+    graph.add_node("safety", partial(batch.safety, client=client, tools=safety_tools))
+    graph.add_node("retry_route", partial(batch.retry_route, client=client, tools=route_tools))
+    graph.add_node("collect", batch.collect)
+    graph.add_node("finish", partial(finalize, client=client, route_tools=route_tools, safety_tools=safety_tools))
+    graph.add_node("replan", batch.replan)
+    graph.add_node("execution", batch.execution)
+    graph.add_node("failure", batch.failure)
     graph.add_edge(START, "dispatch")
     for node, selector, destinations in (
-        ("dispatch", after_dispatch, ["order", "safety", END]),
-        ("order", after_order, ["fleet", END]),
-        ("fleet", after_fleet, ["route", END]),
-        ("route", after_route, ["safety", END]),
-        ("retry_route", after_route, ["safety", END]),
-        ("safety", after_safety, ["execution", "retry_route", "failure", END]),
+        ("dispatch", after_dispatch, ["order", "safety"]),
+        ("order", after_order, ["fleet", "finish", "failure"]),
+        ("fleet", after_fleet, ["route", "collect", "failure"]),
+        ("route", after_route, ["safety", "collect", "failure"]),
+        ("retry_route", after_route, ["safety", "collect", "failure"]),
+        ("safety", after_safety, ["collect", "execution", "replan", "retry_route", "failure"]),
+        ("collect", after_collect, ["order", "finish"]),
     ):
         graph.add_conditional_edges(node, selector, destinations)
+    graph.add_edge("replan", "order")
+    graph.add_edge("finish", END)
     graph.add_edge("execution", END)
     graph.add_edge("failure", END)
-    return graph.compile(checkpointer=checkpointer)
+    # Queue length bounds planning; max_replans bounds replacements. The default
+    # LangGraph limit of 25 steps would incorrectly stop a small valid batch.
+    return graph.compile(checkpointer=checkpointer).with_config(recursion_limit=10000)

@@ -8,6 +8,12 @@ The project is intentionally structured in phases. The application is not to be 
 
 ### Current Status and Authorization Boundary
 
+- Current verified status: the explicitly authorized ALL-LLM migration is complete with 507 passing offline backend tests and 53 frontend tests; the frontend build and pip check pass. All four roles use the one injected ChatGroq client with Pydantic structured output. Order selects pending orders, Fleet selects robots, Route authors coordinates, and Safety decides approval. Retrieval tools do not run A*, minimum-cost selection, or deterministic safety validation. Safety rejection feeds a bounded Route retry; replacement proposals require a fresh Execute. Batch projection, partial execution commits, checkpoint isolation, and the existing dashboard are preserved. WarehouseSimulation retains deterministic execution/data-integrity checks; warehouse source files are unchanged. The existing Starlette deprecation warning remains. No live Groq call was made.
+
+- Authorization update: the user's ALL-LLM request supersedes the historical requirements below that Route must use A* and Safety must use deterministic validation as its decision. A* remains available as a standalone domain utility, and atomic simulation execution still validates movement. Earlier milestone statements below describe historical boundaries, not the current role implementation. No additional infrastructure is authorized.
+
+- Earlier verified status: the explicitly authorized multi-order batch extension is implemented with 522 passing offline backend tests and 51 frontend tests; the frontend build succeeds. Typed PlannedDelivery records, private projection, per-order all-robot A* reevaluation, creation-order looping, bounded full reassignment on stale Execute, and review-only replacements are implemented. Expected execution failure publishes the completed prefix; unexpected graph/checkpoint errors preserve the prior command commit. The React dashboard lists batch assignments/results and selects routes in sequence. Earlier milestone statuses below are historical. See docs/architecture.md for batch commit semantics and limitations.
+
 - Groq-only provider migration is verified with 499 passing offline tests. `app.config.create_model_client` constructs the shared ChatGroq client using GROQ_API_KEY/GROQ_MODEL and existing timeout/retry settings. Structured output uses function_calling; the optional live smoke command is `.\.venv\Scripts\python.exe scripts/test_groq_api.py`. Live account access has not been tested.
 
 - Latest verified status: Milestone F is complete with 498 passing offline tests, including 76 FastAPI TestClient cases. `backend/app/api/` is a thin synchronous adapter using SessionCoordinator exclusively. Missing/consumed proposals return typed expected command rejection with the previous committed state. Lifespan creates one client/coordinator, with offline injection supported. The suite reports one dependency deprecation warning from Starlette's AnyIO BlockingPortal alias. React, WebSockets, streaming, database persistence, authentication, deployment, and Milestone G remain unimplemented and require explicit authorization. The Milestone E entry below records its earlier boundary.
@@ -45,6 +51,7 @@ backend/app/graph/updates.py
 backend/app/graph/agents.py
 backend/app/graph/tools.py
 backend/app/graph/graph.py
+backend/app/graph/batch.py
 backend/app/sessions.py
 backend/app/api/__init__.py
 backend/app/api/main.py
@@ -66,6 +73,7 @@ backend/tests/test_fleet_agent.py
 backend/tests/test_route_agent.py
 backend/tests/test_safety_agent.py
 backend/tests/test_graph_workflow.py
+backend/tests/test_batch.py
 backend/tests/test_sessions.py
 backend/tests/test_api.py
 pytest.ini

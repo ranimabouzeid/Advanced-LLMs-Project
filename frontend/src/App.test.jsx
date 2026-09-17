@@ -104,3 +104,16 @@ it('while pending disables duplicate commands and appends no fabricated activity
   expect(screen.getByRole('button',{name:'Reset',exact:true})).toBeDisabled();
   await act(async()=>waiting.resolve(response(envelope(ready,'session-a','ready'))));
 });
+
+it('shows committed partial batch results and requires planning the remainder', async () => {
+  const user = await start(ready);
+  const partial = structuredClone(delivered);
+  partial.run_outcome = 'partial';
+  partial.planned_deliveries = [{ order_id: 'o', robot_id: 'robot-1', status: 'delivered', delivery_plan: ready.delivery_plan }];
+  fetch.mockResolvedValueOnce(response(envelope(partial, 'session-a', 'partial')));
+  await user.click(screen.getByRole('button', { name: 'Execute', exact: true }));
+  expect(await screen.findByText('Batch partially delivered')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Execute', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Plan', exact: true })).toBeEnabled();
+  expect(screen.getByLabelText('Delivery route')).toBeVisible();
+});

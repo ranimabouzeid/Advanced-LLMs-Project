@@ -7,7 +7,7 @@ export default function ControlsPanel({ state, selectedCell, busy, unavailable, 
   const disabled = busy || unavailable;
   return <section className="panel"><h2>Command center</h2>
     <div className="command-buttons"><button disabled={disabled} onClick={() => run('plan')}>Plan</button>
-      <button className="primary" disabled={disabled || !state.delivery_plan} onClick={() => run('execute')}>Execute</button>
+      <button className="primary" disabled={disabled || (!state.delivery_plan && !state.robot_schedules?.some(s => ['approved', 'stale'].includes(s.parking.status)))} onClick={() => run('execute')}>Execute</button>
       <button disabled={disabled} onClick={() => run('reset')}>Reset</button></div>
     <p className="muted">Plan proposes. Execute revalidates. Reset starts a fresh session.</p>
     <form onSubmit={async event => { event.preventDefault();

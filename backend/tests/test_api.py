@@ -138,7 +138,7 @@ def test_plan_ready_then_execute_delivered(http):
     ready = command(http, sid, "plan")
     assert ready["outcome"] == "ready" and ready["error"] is None
     assert ready["state"]["warehouse"] == before["warehouse"]
-    assert [item["node"] for item in ready["state"]["node_activity"]] == ["order", "fleet", "route", "safety"]
+    assert [item["node"] for item in ready["state"]["node_activity"]] == ["order", "fleet", "route", "safety", "route", "safety", "route", "safety"]
     assert state(http, sid) == ready["state"]
     delivered = command(http, sid, "execute")
     assert delivered["outcome"] == "delivered"
@@ -151,12 +151,12 @@ def test_plan_no_work(http):
     assert result["outcome"] == "no_work" and result["error"] is None
 
 
-def test_plan_naturally_unreachable_preserves_fleet_no_robot(http):
+def test_plan_reports_route_model_unreachable(http):
     sid = prepared(http)
     assert http.post(f"{ROOT}/{sid}/blocked-cells", json=ORDER["pickup"]).status_code == 200
     result = command(http, sid, "plan")
-    assert result["outcome"] == "no_robot"
-    assert [item["node"] for item in result["state"]["node_activity"]] == ["order", "fleet"]
+    assert result["outcome"] == "unreachable"
+    assert [item["node"] for item in result["state"]["node_activity"]] == ["order", "fleet", "route"]
 
 
 def test_route_unreachable_during_stale_execute(http):
@@ -182,10 +182,10 @@ def test_stale_execute_returns_review_only_then_explicit_delivery(http):
     assert command(http, sid, "execute")["outcome"] == "delivered"
 
 
-def test_consumed_proposal_failed_attempt_keeps_delivery_and_unrelated_order(http):
+def test_consumed_batch_failed_attempt_keeps_all_deliveries(http):
     sid = prepared(http)
     other = {**ORDER, "order_id": "other", "package_id": "other-p"}
-    pending = http.post(f"{ROOT}/{sid}/orders", json=other).json()["state"]["warehouse"]["orders"][1]
+    assert http.post(f"{ROOT}/{sid}/orders", json=other).status_code == 201
     command(http, sid, "plan")
     delivered = command(http, sid, "execute")["state"]
     for _ in range(2):
@@ -193,7 +193,7 @@ def test_consumed_proposal_failed_attempt_keeps_delivery_and_unrelated_order(htt
         assert rejected["outcome"] == "failed"
         assert rejected["error"]["code"] == "consumed_proposal"
         assert rejected["state"] == delivered == state(http, sid)
-    assert delivered["warehouse"]["orders"][1] == pending
+    assert delivered["warehouse"]["orders"][1]["status"] == "delivered"
 
 
 def test_missing_proposal_returns_previous_commit(http):
