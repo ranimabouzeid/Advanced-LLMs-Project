@@ -1,4 +1,4 @@
-"""Sequential command workflow. No persistence, sessions, or external services."""
+"""Sequential command workflow with optional checkpointing."""
 
 from functools import partial
 from typing import Any
@@ -112,7 +112,7 @@ def execution(state: WarehouseGraphState) -> StateUpdate:
 def build_graph(*, client: BaseChatModel, order_tools: OrderTools | None = None,
                 fleet_tools: FleetTools | None = None, route_tools: RouteTools | None = None,
                 safety_tools: SafetyTools | None = None, fleet_model: bool = False,
-                safety_model: bool = False):
+                safety_model: bool = False, checkpointer=None):
     """Compile with one injected shared client; optional roles reuse that client."""
     graph = StateGraph(WarehouseGraphState, input_schema=CommandInput)
     graph.add_node("dispatch", dispatch, input_schema=CommandInput)
@@ -135,4 +135,4 @@ def build_graph(*, client: BaseChatModel, order_tools: OrderTools | None = None,
         graph.add_conditional_edges(node, selector, destinations)
     graph.add_edge("execution", END)
     graph.add_edge("failure", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

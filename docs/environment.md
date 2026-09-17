@@ -38,8 +38,8 @@ pins; future installations can resolve newer versions.
 
 Phase 1 added environment setup only. The subsequent user-authorized Phase 2 added
 domain models and basic simulation; see [warehouse usage](warehouse.md).
-The subsequent routing phase added deterministic A* pathfinding. There is no
-React initialization, FastAPI service, or LangGraph agent.
+Subsequent milestones added A*, four LangGraph roles, command orchestration,
+process-local sessions, and the thin FastAPI service. React remains future work.
 
 Run the tests from the repository root:
 
@@ -63,3 +63,36 @@ project virtual environment. Copy `.env.example` to ignored `.env`, replace its
 placeholders, and load it explicitly with `load_settings(env_file=".env")`.
 Create one client during application setup and pass it to future consumers.
 See [configuration and ownership](architecture.md#shared-llm-configuration).
+
+## Milestone F API
+
+The API uses existing installed FastAPI, Starlette, HTTPX, Pydantic and Uvicorn
+dependencies. No dependency upgrades or additional infrastructure were added.
+The default app creates one model client and coordinator during lifespan startup,
+never during import. Live startup requires configured model settings and the
+optional Gemini integration described above. Startup configuration errors fail
+startup; the application does not silently substitute a fake client.
+
+From the repository root, after configuring the ignored `.env`:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.api.main:app --app-dir backend --env-file .env --port 8000
+```
+
+Alternatively export the settings into the process environment and omit
+`--env-file .env`. The API does not implicitly search for dotenv files.
+Use one process: sessions and checkpoints live only in that process's RAM and
+are lost on restart. This is a local development service, with no deployment setup.
+Interactive documentation is at `http://localhost:8000/docs`; OpenAPI is at
+`http://localhost:8000/openapi.json`.
+
+`CORS_ALLOWED_ORIGINS` accepts comma-separated origins and defaults to
+`http://localhost:5173`. Explicit `create_app(allowed_origins=[...])` overrides it;
+an empty list disables allowed origins. CORS permits GET, POST, DELETE and
+Content-Type, with credentials disabled.
+
+Offline tests use `create_app(coordinator=SessionCoordinator(client=fake_client))`
+inside a TestClient context. They neither load live model settings nor require
+credentials. Verification: 498 tests passed, including 76 API tests. One installed
+Starlette TestClient warning reports the deprecated `anyio.abc.BlockingPortal`
+alias; no dependency versions were changed or warnings suppressed.

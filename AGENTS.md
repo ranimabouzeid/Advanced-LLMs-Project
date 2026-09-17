@@ -8,6 +8,10 @@ The project is intentionally structured in phases. The application is not to be 
 
 ### Current Status and Authorization Boundary
 
+- Latest verified status: Milestone F is complete with 498 passing offline tests, including 76 FastAPI TestClient cases. `backend/app/api/` is a thin synchronous adapter using SessionCoordinator exclusively. Missing/consumed proposals return typed expected command rejection with the previous committed state. Lifespan creates one client/coordinator, with offline injection supported. The suite reports one dependency deprecation warning from Starlette's AnyIO BlockingPortal alias. React, WebSockets, streaming, database persistence, authentication, deployment, and Milestone G remain unimplemented and require explicit authorization. The Milestone E entry below records its earlier boundary.
+
+- Latest verified status: Milestone E is complete with 422 passing offline tests, including 39 session cases. `backend/app/sessions.py` provides one in-memory saver, the existing graph with optional checkpointing, UUID/thread mapping, private committed-checkpoint references, nonblocking per-session guards, validated mutations, and reset retirement. Intermediate failed checkpoints never replace committed state. No FastAPI, React, disk/database persistence, deployment, or Milestone F work is authorized. Earlier milestone entries below are historical snapshots.
+
 - Phase 1 (repository/environment setup) is complete. The local Windows virtual environment `.venv` uses Python 3.11.9.
 - All seven requested dependencies are installed and import successfully; `pip check` reports no broken requirements.
 - The user-authorized Phase 2 combines warehouse domain models and basic deterministic simulation, originally roadmap steps 2 and 3. Both are implemented under `backend/app/warehouse/` with 59 passing tests.
@@ -38,6 +42,12 @@ backend/app/graph/state.py
 backend/app/graph/updates.py
 backend/app/graph/agents.py
 backend/app/graph/tools.py
+backend/app/graph/graph.py
+backend/app/sessions.py
+backend/app/api/__init__.py
+backend/app/api/main.py
+backend/app/api/schemas.py
+backend/app/api/sessions.py
 backend/app/config.py
 .env.example
 backend/tests/test_models.py
@@ -53,6 +63,9 @@ backend/tests/test_order_agent.py
 backend/tests/test_fleet_agent.py
 backend/tests/test_route_agent.py
 backend/tests/test_safety_agent.py
+backend/tests/test_graph_workflow.py
+backend/tests/test_sessions.py
+backend/tests/test_api.py
 pytest.ini
 frontend/.gitkeep
 docs/environment.md
@@ -334,7 +347,7 @@ Basic checks from the repository root:
 git status --short
 ```
 
-The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 347 passing offline cases. Do not edit unrelated parent configuration.
+The repository-local `pytest.ini` selects `backend/tests` and adds `backend` to the Python path. It replaces accidental discovery of the parent course project's configuration. The current suite has 498 passing offline cases. Do not edit unrelated parent configuration.
 
 For documentation-only changes, review the diff and run `git diff --check`; no new tests are needed. For code changes, run checks appropriate to the phase and report exact outcomes, including environmental blockers.
 

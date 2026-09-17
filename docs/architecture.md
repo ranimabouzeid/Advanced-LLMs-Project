@@ -314,7 +314,8 @@ No Safety workflow edges, MemorySaver integration, API, or frontend were added.
 `graph/graph.py:build_graph` compiles a sequential `WarehouseGraphState` graph,
 with one injected model client and the existing role tools. Fleet and Safety
 remain deterministic by default; optional model assistance reuses that client.
-There is no checkpointer, session storage, API, or frontend.
+The original Milestone D graph had no checkpointer or session storage. Milestone E
+below adds optional checkpointing and a coordinator; API and frontend remain future work.
 
 Nodes are dispatch, order, fleet, route, retry_route, safety, execution, and failure.
 Dispatch establishes execution intent only for an explicit execute command and
@@ -325,8 +326,8 @@ Other invalid domain/state input remains subject to Pydantic validation.
 PLAN follows Order -> Fleet -> Route -> Safety. Conditional edges terminate on
 no_work, no_robot, unreachable, or role failure. A safe proposal ends ready without
 movement. EXECUTE starts at Safety, revalidating the supplied proposal against the
-supplied authoritative snapshot. Missing proposals fail. No persisted state is
-loaded: the caller passes the full current input to each invocation.
+supplied authoritative snapshot. Missing proposals fail. Without the Milestone E
+coordinator, the caller passes the full current input to each invocation.
 
 Safety's typed activity status distinguishes deterministic rejection from an
 operational failure. Model/tool failure is terminal, even if deterministic findings
@@ -374,3 +375,312 @@ recovery; production PLAN nodes never mutate warehouse state. Tests cover early
 termination, exact retry budgets, consumed failed attempts, changed occupancy/start
 positions, review-only replacement, independent execution guards, malformed plans,
 operational failures, and atomic publication/rollback.
+
+## Milestone E: process-local sessions
+
+`app/sessions.py` provides one synchronous `SessionCoordinator(client=...)`, one
+`InMemorySaver` (also called MemorySaver), and one existing graph compiled with
+that saver. `build_graph(..., checkpointer=None)` still supports uncheckpointed
+use. No nodes or conditional edges were duplicated or changed.
+
+Each new session uses a UUID string directly as LangGraph `thread_id`. The private
+registry contains only a lock and a committed `RunnableConfig` reference per ID,
+including `thread_id`, `checkpoint_ns`, and `checkpoint_id`. It holds no warehouse
+copy and no persistent simulation. `WarehouseGraphState` in the committed
+checkpoint is the sole authoritative session state. Domain mutations and atomic
+execution construct temporary simulations.
+
+Public interface:
+
+| Method | Return |
+| --- | --- |
+| `create_session()` | `SessionCreated(session_id, state)` |
+| `get_state(session_id)` | Validated committed `WarehouseGraphState` |
+| `plan(session_id)` | Committed workflow state |
+| `execute(session_id)` | Committed workflow state |
+| `create_order(session_id, order_id, package_id, pickup, dropoff)` | Committed updated state |
+| `add_blocked_cell(session_id, position)` | Committed updated state |
+| `remove_blocked_cell(session_id, position)` | Committed updated state |
+| `reset(session_id)` | `SessionCreated` with a fresh ID/state |
+
+Positions use the existing `Position` model. Typed service errors are
+`UnknownSession`, `SessionBusy`, `InvalidMutation`, and `SessionExecutionError`,
+all under `SessionError`. There is no public state replacement, plan injection,
+safety override, checkpoint selection, or historical replay interface.
+
+Initialization and direct mutations publish all graph-state channels with public
+`update_state(..., as_node="execution")`. This attribution does not call execution;
+its unconditional END edge ensures the checkpoint schedules no work. Publication
+retrieves the returned checkpoint, validates with `WarehouseGraphState.model_validate`,
+and checks state equality and absence of scheduled work before advancing the
+committed reference. Mutations reuse domain operations and `replace_warehouse`,
+including their revision increments, no-op behavior, and stale-approval invalidation.
+
+PLAN and EXECUTE retrieve the exact committed checkpoint and submit its complete
+state, with the new command, to `invoke` using that checkpoint's config. They never
+resume with `None` or start from an unqualified latest checkpoint. Invocation uses
+synchronous checkpoint durability. Only after it finishes does the coordinator
+retrieve the thread's resulting latest checkpoint, reconstruct the state, check
+that execution finished and no new node reported operational failure, and advance
+the private committed reference. Same-thread exclusion makes this final latest
+lookup unambiguous. Existing typed node failures also become `SessionExecutionError`;
+expected domain outcomes such as no work/resources, unreachable routes, and
+deterministic safety rejection remain workflow state results.
+
+Intermediate checkpoints may exist after any failed command, including after a
+delivery checkpoint was written but the operation raised. They are never exposed
+by `get_state`: it always uses the exact committed config. Failed reads, writes,
+reconstruction, model execution, or invocation leave that reference unchanged.
+The next command forks from the committed config with fresh command input. This
+also prevents pending work from a failed intermediate checkpoint being resumed.
+Only simulated delivery is supported; there are no external physical side effects.
+
+Every operation on an existing session, including reads and reset, acquires its
+nonblocking lock and holds it through reconstruction and committed-reference
+publication. Contention raises `SessionBusy`. `finally` releases the lock on both
+success and failure. A small registry lock covers only lookup/guard acquisition
+and registration/retirement; it is never held during graph/model/checkpoint work.
+Other sessions can progress while one session is running.
+
+Execution retains Milestone D's Safety revalidation, revision checks, atomic
+delivery and review-only replacement proposals. Successful delivery consumes
+selection/plan/safety. Duplicate EXECUTE originally raised `SessionExecutionError` for the
+missing proposal and preserves the delivered commit, including robot positions,
+battery, order completion, and unrelated pending orders.
+
+Reset holds the old guard while creating and validating a fresh initial checkpoint
+on a new UUID/thread. Only after this succeeds does registry bookkeeping register
+the new session and retire the old ID. Old commands then raise `UnknownSession`.
+Failed reset preserves the old session. No selections, routes, blocks, safety, or
+diagnostics transfer. Old checkpoints can remain in memory but are inaccessible
+through the coordinator and cannot affect the new thread.
+
+The serializer reuses Milestone B's `JsonPlusSerializer` approach with an explicit
+allowlist of workflow/domain records and enums and `pickle_fallback=False`.
+All storage is process-local RAM: restarting or recreating the coordinator loses
+session access. Checkpoint history can grow during its lifetime; this milestone
+adds neither disk/database persistence nor a retention service.
+
+Checkpoint retrieval example (with `backend` on the Python path and an injected
+model client, which may be fake):
+
+```python
+from app.sessions import SessionCoordinator
+from app.warehouse import Position
+
+sessions = SessionCoordinator(client=client)
+created = sessions.create_session()
+sessions.create_order(created.session_id, "o", "p",
+                      Position(x=2, y=0), Position(x=9, y=0))
+planned = sessions.plan(created.session_id)
+retrieved = sessions.get_state(created.session_id)
+assert retrieved == planned  # Exact committed checkpoint, validated on retrieval.
+```
+
+The implementation follows public LangGraph APIs documented in
+[checkpointer persistence](https://docs.langchain.com/oss/python/langgraph/persistence),
+[checkpoint forking](https://docs.langchain.com/oss/python/langgraph/use-time-travel),
+and [`update_state` attribution](https://reference.langchain.com/python/langgraph/pregel/main/Pregel/update_state).
+It does not inspect saver storage internals.
+
+Verification: 422 offline tests pass, including 39 session cases. Session tests
+cover real intermediate checkpoints after interruption, failed final publication,
+retry from the committed config, two-session warehouse isolation, actual threaded
+busy rejection and independent progress, mutation invalidation, duplicate delivery,
+reset isolation and failed-reset rollback. No live credentials are required.
+At Milestone E completion, FastAPI remained future work. Milestone F below adds it;
+React, deployment and persistent storage remain unimplemented.
+
+## Milestone F: thin FastAPI service
+
+`app/api/main.py` exposes `create_app(*, coordinator=None, allowed_origins=None)`
+and the importable `app`. The API is a synchronous HTTP adapter over
+`SessionCoordinator`, the sole application-facing behavior gateway. Handlers call
+its public methods, never a simulation, graph node, saver, or private registry.
+`app/api/sessions.py` only retrieves the application-owned coordinator from
+`app.state`. Request/response definitions live in `app/api/schemas.py`.
+
+Lifespan uses a supplied coordinator directly. Otherwise it calls the existing
+model-client factory once and constructs one coordinator for the application's
+lifetime. Importing the API creates no model client, performs no model invocation,
+and loads no model credentials. Offline tests inject a real coordinator with fake
+model clients. Default live startup requires the existing optional provider
+integration and model environment settings; no automatic fake fallback exists.
+
+### Endpoint and schema contract
+
+| Method | Path | Coordinator method | Successful response |
+| --- | --- | --- | --- |
+| POST | `/api/sessions` | `create_session()` | 201 SessionResponse |
+| GET | `/api/sessions/{session_id}/state` | `get_state(id)` | 200 SessionResponse |
+| POST | `/api/sessions/{session_id}/orders` | `create_order(id, ...)` | 201 SessionResponse |
+| POST | `/api/sessions/{session_id}/plan` | `plan(id)` | 200 CommandResponse |
+| POST | `/api/sessions/{session_id}/execute` | `execute(id)` | 200 CommandResponse |
+| POST | `/api/sessions/{session_id}/blocked-cells` | `add_blocked_cell(id, position)` | 200 SessionResponse |
+| DELETE | `/api/sessions/{session_id}/blocked-cells/{x}/{y}` | `remove_blocked_cell(id, position)` | 200 SessionResponse |
+| POST | `/api/sessions/{session_id}/reset` | `reset(id)` | 201 SessionResponse with new ID |
+
+`CreateOrderRequest` contains `order_id: Identifier`, `package_id: Identifier`,
+`pickup: Position`, and `dropoff: Position`. Example:
+
+```json
+{"order_id":"o","package_id":"p","pickup":{"x":2,"y":0},"dropoff":{"x":9,"y":0}}
+```
+
+Add-block uses the existing Position model directly: `{"x":5,"y":0}`. DELETE
+parses integer path coordinates and constructs that same model. Strict coordinate
+JSON fields reject strings, floats and booleans. Domain validation, including
+bounds, occupied cells, duplicate IDs, and drop-off eligibility, stays in the
+coordinator/domain layer. Every request model forbids extra fields. Session
+creation, PLAN, EXECUTE and reset reject any nonempty HTTP body, including `{}`;
+no arbitrary state, plan, safety approval or checkpoint reference can be supplied.
+Order creation only creates pending work; it never triggers planning or execution.
+
+`SessionResponse` contains `session_id: str` and `state: WarehouseGraphState`.
+`CommandResponse` adds `outcome: RunOutcome` and optional `error: ApiError`.
+`ApiError` has an enumerated stable code and sanitized message; `ErrorResponse`
+wraps it in `error`. Existing nested domain models are reused. Revision is exposed
+at `state.warehouse.revision`, not via a duplicate mutable revision field.
+
+### Committed state and errors
+
+For commands, `outcome` describes the attempt and `state` always describes the
+authoritative committed checkpoint. A failed attempt can therefore return
+`outcome="failed"` with `state.run_outcome="delivered"`. The API never changes a
+committed state to match a rejected attempt or reads an intermediate checkpoint.
+
+The only coordinator refinement is `SessionCommandRejected`, a specific subtype
+of `SessionExecutionError` preserving compatibility for existing service callers.
+Under the session guard, EXECUTE without a proposal raises this typed exception
+before invoking the graph. It carries the prior committed state and code
+`consumed_proposal` when that state's outcome is delivered, otherwise
+`missing_proposal`. No diagnostic text is parsed and no checkpoint is published.
+Its specific HTTP handler returns a 200 failed CommandResponse. Other recognized
+deterministic terminal workflow rejections retain their existing committed failed
+state and receive code `workflow_rejected`. Operational node/model failures and
+unexpected graph/checkpoint failures remain internal failures.
+
+| Condition | HTTP | Public code/result |
+| --- | --- | --- |
+| Request validation or forbidden body | 422 | `invalid_request` |
+| InvalidMutation | 422 | `invalid_mutation` |
+| UnknownSession, including retired ID | 404 | `unknown_session` |
+| SessionBusy | 409 | `session_busy` |
+| Missing/consumed proposal | 200 | Failed command with prior committed state |
+| Ready, delivered, no_work, no_robot, unreachable, deterministic failed | 200 | Typed command outcome |
+| SessionExecutionError or unexpected exception | 500 | `internal_error` |
+
+Custom validation errors omit raw inputs, exception context, and request bodies.
+Internal error responses contain a fixed safe message, no exception repr or stack
+trace. A specific exception handler for SessionCommandRejected takes precedence
+over its SessionExecutionError base handler. Failed checkpoint publication leaves
+the coordinator commit unchanged, as in Milestone E.
+
+### Example responses
+
+These are shortened JSON excerpts from a fake-client TestClient demonstration;
+the actual responses include the entire validated state, including all robots,
+orders, obstacles, selection, routes, safety, and ordered activity records.
+
+Create session (201):
+
+```json
+{
+  "session_id": "1ba311a3-c6c8-40fb-9787-39e4327fb57a",
+  "state": {
+    "warehouse": {"revision": 0},
+    "run_outcome": "idle",
+    "delivery_plan": null,
+    "safety": null,
+    "node_activity": []
+  }
+}
+```
+
+PLAN after creating the example order (200):
+
+```json
+{
+  "session_id": "1ba311a3-c6c8-40fb-9787-39e4327fb57a",
+  "outcome": "ready",
+  "error": null,
+  "state": {
+    "warehouse": {"revision": 1},
+    "run_outcome": "ready",
+    "execution_requested": false,
+    "delivery_plan": {"order_id": "o", "robot_id": "robot-1", "total_steps": 9, "warehouse_revision": 1}
+  }
+}
+```
+
+Block `(5, 0)`, then EXECUTE (200, replacement ready):
+
+```json
+{
+  "session_id": "1ba311a3-c6c8-40fb-9787-39e4327fb57a",
+  "outcome": "ready",
+  "error": null,
+  "state": {
+    "warehouse": {
+      "revision": 2,
+      "robots": [{"id": "robot-1", "position": {"x": 0, "y": 0}, "battery": 100}]
+    },
+    "run_outcome": "ready",
+    "execution_requested": false,
+    "delivery_plan": {"order_id": "o", "robot_id": "robot-1", "total_steps": 11, "warehouse_revision": 2}
+  }
+}
+```
+
+The robot has not moved or spent battery. A second explicit EXECUTE delivers it
+at `(9, 0)` with battery 89 and revision 3. Another EXECUTE then returns:
+
+```json
+{
+  "session_id": "1ba311a3-c6c8-40fb-9787-39e4327fb57a",
+  "outcome": "failed",
+  "error": {
+    "code": "consumed_proposal",
+    "message": "No delivery proposal is available; plan before executing"
+  },
+  "state": {
+    "warehouse": {"revision": 3},
+    "run_outcome": "delivered",
+    "delivery_plan": null,
+    "safety": null
+  }
+}
+```
+
+### Runtime and verification
+
+Endpoints are synchronous and return after the complete coordinator operation.
+`node_activity` is the actual ordered committed history, not a live event stream;
+there are no WebSockets or streaming updates. CORS defaults to
+`http://localhost:5173`, configurable via comma-separated `CORS_ALLOWED_ORIGINS`
+or explicit factory origins. GET, POST, DELETE and Content-Type are permitted;
+credentials are disabled. See [local startup](environment.md#milestone-f-api).
+
+Nested models serialize through FastAPI: tuples become arrays, enums become
+strings, unknown safety is null, and cell sets use the existing sorted serializer.
+No clients, locks, checkpoint configs or environment secrets appear in responses
+or OpenAPI. `/docs` and `/openapi.json` succeed, and schema tests verify all eight
+operations and the absence of request bodies on command/session creation/reset.
+
+Verification: 498 offline tests pass, including 76 API cases. Tests cover real
+session/graph integration, actual busy contention with independent session reads,
+stale route review, duplicate execution, reset, strict input rejection, checkpoint
+and model failure preservation, and serialization. A subprocess import test forbids
+client-factory calls during API import. A source boundary test excludes simulation,
+graph runtime, saver and private coordinator access from the API package.
+
+Fleet continues to report no_robot when its reachability checks exclude all
+candidates. Route unreachable is tested by blocking pickup after planning, then
+executing the stale proposal; the admitted retry terminates unreachable without
+movement. Narrow service doubles cover HTTP-only failures and terminal failed
+outcome mapping; normal flows use the real coordinator and fake models.
+
+One installed Starlette/AnyIO deprecation warning remains; no tests failed and no
+warnings were suppressed. Live Gemini calls were not performed. Sessions remain
+process-local RAM only, lost on restart. No database, authentication, deployment,
+React or Milestone G functionality was added.
