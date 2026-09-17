@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from app.warehouse.models import DomainModel, Identifier, Order, OrderStatus, Robot, RobotStatus, WarehouseState
+from app.warehouse.models import DeliveryPlan, DomainModel, Identifier, Order, OrderStatus, Robot, RobotStatus, WarehouseState
 from app.warehouse.routing import plan_delivery
 
 
@@ -67,3 +67,12 @@ class FleetTools:
         return FleetCandidate(**values, total_steps=plan.total_steps,
                               outcome="eligible" if robot.battery >= plan.total_steps
                               else "insufficient_battery")
+
+
+class RouteTools:
+    """Complete two-leg A* planning only; no model or safety approval."""
+
+    def build_delivery_plan(self, warehouse: WarehouseState, order_id: Identifier,
+                            robot_id: Identifier) -> DeliveryPlan | None:
+        """Return the existing planner's output unchanged; None means unreachable."""
+        return plan_delivery(warehouse, order_id, robot_id)

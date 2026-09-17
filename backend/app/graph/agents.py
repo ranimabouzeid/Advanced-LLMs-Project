@@ -1,4 +1,4 @@
-"""Standalone Order and Fleet roles; no graph construction or execution."""
+"""Standalone Order, Fleet, and Route roles; no graph construction or execution."""
 
 import json
 
@@ -7,11 +7,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from app.config import structured_output
-from app.warehouse.models import Identifier, OrderStatus
+from app.warehouse.models import DeliveryPlan, Identifier, OrderStatus
 
 from .state import OrderSelection, ShortText, WarehouseGraphState, WorkflowModel
-from .tools import FleetTools, OrderTools
-from .updates import StateUpdate, fleet_result, order_result
+from .tools import FleetTools, OrderTools, RouteTools
+from .updates import StateUpdate, fleet_result, order_result, route_result
 
 
 def order_agent(state: WarehouseGraphState, *, client: BaseChatModel,
@@ -118,3 +118,27 @@ def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel | None = No
     except Exception:
         message = "Fleet model failed" if stage == "model" else "Fleet tool failed"
     return fleet_result(state, outcome="failed", message=message)
+
+
+def route_agent(state: WarehouseGraphState, *, tools: RouteTools | None = None) -> StateUpdate:
+    """One fresh A* planning attempt. No LLM input, retries, or safety decision.
+
+    The trusted tool receives the current snapshot and selected identifiers.
+    Its complete plan is published through the existing fresh-plan helper.
+    """
+    if state.order_selection is None or state.selected_robot_id is None:
+        return route_result(state, outcome="failed", error="Route requires a selected order and robot")
+    tools = tools if tools is not None else RouteTools()
+    try:
+        plan = tools.build_delivery_plan(state.warehouse, state.order_selection.order_id,
+                                         state.selected_robot_id)
+        if plan is None:
+            return route_result(state, outcome="unreachable")
+        if not isinstance(plan, DeliveryPlan):
+            return route_result(state, outcome="failed", error="Route tool returned an invalid plan")
+        return route_result(state, outcome="planned", plan=plan)
+    except TimeoutError:
+        error = "Route tool timed out"
+    except Exception:
+        error = "Route planning failed"
+    return route_result(state, outcome="failed", error=error)

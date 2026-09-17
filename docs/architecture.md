@@ -4,7 +4,7 @@ The shared-state portion of Milestone B lives in `backend/app/graph/state.py`
 and its deterministic partial-update helpers in `backend/app/graph/updates.py`.
 `WarehouseGraphState` is a frozen Pydantic BaseModel with forbidden extra fields.
 It imports the existing domain models; domain code does not import graph code.
-Only the standalone Order and Fleet Agents are implemented; other roles, graph wiring,
+Only the standalone Order, Fleet, and Route Agents are implemented; Safety, graph wiring,
 reducers, and checkpoint integration are not implemented. Shared model configuration lives outside graph state in
 `backend/app/config.py`; no client is created at import time.
 
@@ -196,7 +196,7 @@ are not swallowed. Tests use a fake chat model implementing the structured-outpu
 boundary with real Pydantic JSON parsing, plus injected failure runnables. No
 Gemini integration package, credentials, or API calls are needed for these tests.
 
-The Order-only increment added 21 tests. Route, Safety, and all production graph
+The Order-only increment added 21 tests. Safety and all production graph
 wiring remain unimplemented; Milestone C is partial.
 
 ## Milestone C: Fleet Agent
@@ -242,4 +242,35 @@ Order selection, warehouse/revision, command, and max_replans are preserved.
 
 The full suite has 307 passing offline tests, including 36 Fleet cases with actual
 A* detours and injected structured-model/tool failures. No provider installation
-or live credentials were needed. Route Agent and Safety Agent are not implemented.
+or live credentials were needed. Safety Agent is not implemented.
+
+## Milestone C: Route Agent
+
+`route_agent(state, tools=None)` performs one fresh planning attempt from the
+authoritative warehouse, selected order ID, and selected robot ID. `RouteTools`
+exposes only `build_delivery_plan(snapshot, order_id, robot_id)`, which delegates
+directly to Milestone A's `plan_delivery` and returns its DeliveryPlan or None.
+The existing planner calls A* for robot-to-pickup and pickup-to-drop-off, retaining
+endpoints, total movement cost, and the current warehouse revision. There is no
+duplicated pathfinding, model client, generated-coordinate input, or safety approval.
+
+`route_result` uses the existing `fresh_plan` helper on success. Its partial update
+contains delivery_plan, planning_outcome, safety, replan_count, error_message,
+execution_requested, run_outcome, and node_activity. Fresh attempts reset retries
+to zero, clear safety/errors/execution intent, and append one Route activity.
+Success sets planning_outcome=planned and run_outcome=running; Safety has not run.
+An unreachable leg sets both outcomes to unreachable and clears the previous plan.
+Missing selections, invalid tool return types, and ordinary tool errors set failed
+with a sanitized diagnostic and no plan. Neither selections nor warehouse change.
+
+This entry point is explicitly fresh planning; future retry orchestration must
+use the separate replan contract rather than calling this reset path as a retry.
+No retry loop or conditional dispatch is implemented. Runtime tool injection is
+trusted application/test code, not a model-facing extension point.
+
+The full suite has 324 passing tests, including 17 Route cases covering zero-step
+legs, obstacles represented by blocked cells, other robot occupancy, unreachable
+endpoints, revision retention, exact domain-plan equality, failure handling, and
+owned-field invalidation. Existing domain tests cover permanent shelf obstacles.
+Tests use no credentials or live calls. Milestone C remains partial until Safety
+is separately authorized and implemented.

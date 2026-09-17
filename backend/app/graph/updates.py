@@ -128,6 +128,24 @@ def fresh_plan(state: WarehouseGraphState, plan: DeliveryPlan) -> StateUpdate:
     return _plan_update(state, plan, 0)
 
 
+def route_result(state: WarehouseGraphState, *, plan: DeliveryPlan | None = None,
+                 outcome: Literal["planned", "unreachable", "failed"],
+                 error: str | None = None) -> StateUpdate:
+    """Publish one fresh planning attempt, never safety approval or movement."""
+    if (outcome == "planned") != (plan is not None):
+        raise ValueError("Planned outcome requires a delivery plan")
+    if (outcome == "failed") != (error is not None):
+        raise ValueError("Failed planning requires an error")
+    update = fresh_plan(state, plan) if plan is not None else _clear_proposal()
+    record = NodeActivity(node="route", status="failed" if outcome == "failed" else "completed",
+                          message=error or ("Two-leg A* plan calculated" if plan is not None
+                                           else "Pickup or drop-off is unreachable"))
+    update.update(planning_outcome=outcome,
+                  run_outcome="running" if outcome == "planned" else outcome,
+                  error_message=error, node_activity=(*state.node_activity, record))
+    return _validated(state, update)
+
+
 def replan(state: WarehouseGraphState, plan: DeliveryPlan) -> StateUpdate:
     """Route publishes one retry, incrementing once without resetting its budget.
 
