@@ -16,7 +16,7 @@ from app.warehouse import Position, WarehouseSimulation, WarehouseState
 
 class Fake(FakeMessagesListChatModel):
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        assert method == "json_schema"
+        assert method == "function_calling"
         return self | RunnableLambda(lambda message: schema.model_validate_json(message.content))
 
 

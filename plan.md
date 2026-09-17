@@ -161,9 +161,8 @@ legs, insufficient battery, and failed-delivery rollback all pass offline.
 
 **Audit status:** Offline acceptance verified with 250 passing tests. Shared state,
 invalidation helpers, compiled test-graph partial updates, JSON and checkpoint
-serializer round trips, and shared Gemini configuration are covered. No production
-agents or MemorySaver integration were added. The optional live Gemini package is
-not installed; live client construction/account access remain untested. This does
+serializer round trips, and shared LLM configuration are covered. No production
+agents or MemorySaver integration were added. Live account access remained untested at this milestone. This does
 not authorize Milestone C.
 
 **Owner:** Person 1. Design contracts alongside Milestone A; integrate after A passes.

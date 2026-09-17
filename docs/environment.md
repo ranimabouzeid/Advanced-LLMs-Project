@@ -58,7 +58,7 @@ The implementation uses the existing direct Pydantic/python-dotenv dependencies;
 requirements and installed packages were not changed.
 
 Offline tests inject fake clients and require no credentials. For future live
-Google Gemini setup, `langchain-google-genai` is an optional prerequisite to install in the
+Groq setup, install `langchain-groq` from backend requirements in the
 project virtual environment. Copy `.env.example` to ignored `.env`, replace its
 placeholders, and load it explicitly with `load_settings(env_file=".env")`.
 Create one client during application setup and pass it to future consumers.
@@ -70,7 +70,7 @@ The API uses existing installed FastAPI, Starlette, HTTPX, Pydantic and Uvicorn
 dependencies. No dependency upgrades or additional infrastructure were added.
 The default app creates one model client and coordinator during lifespan startup,
 never during import. Live startup requires configured model settings and the
-optional Gemini integration described above. Startup configuration errors fail
+Groq integration described above. Startup configuration errors fail
 startup; the application does not silently substitute a fake client.
 
 From the repository root, after configuring the ignored `.env`:
@@ -96,3 +96,21 @@ inside a TestClient context. They neither load live model settings nor require
 credentials. Verification: 498 tests passed, including 76 API tests. One installed
 Starlette TestClient warning reports the deprecated `anyio.abc.BlockingPortal`
 alias; no dependency versions were changed or warnings suppressed.
+
+## Groq live smoke test
+
+Install dependencies with `.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt`.
+Set `GROQ_API_KEY` and a tool-capable `GROQ_MODEL` in the ignored root `.env`.
+From the repository root run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/test_groq_api.py
+```
+
+The script uses application settings and the shared factory, then makes one
+structured OrderSelection request. It prints success only after schema validation.
+Process environment values override `.env`. Offline pytest never invokes this script.
+
+Groq migration verification: 499 offline tests passed with the existing Starlette
+warning. Installed langchain-groq 1.1.3 and groq 0.37.1; `pip check` passed.
+Dependencies remain unpinned. No live Groq request was made during verification.

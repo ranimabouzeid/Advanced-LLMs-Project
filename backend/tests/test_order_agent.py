@@ -18,7 +18,7 @@ class StructuredFake(FakeMessagesListChatModel):
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         assert schema is OrderSelection
-        assert method == "json_schema"
+        assert method == "function_calling"
         return self | RunnableLambda(lambda message: schema.model_validate_json(message.content))
 
 

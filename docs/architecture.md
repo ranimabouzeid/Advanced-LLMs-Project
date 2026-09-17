@@ -112,53 +112,32 @@ it introduces no production workflow, conditional edges, or checkpointer.
 ## Shared LLM configuration
 
 `app.config` owns frozen `LLMSettings`, `load_settings`, and
-`create_model_client`. Google Gemini is the initial supported provider; provider-specific
-imports and credential mapping are localized here. No model ID is a code default.
-`LLM_MODEL` must be explicitly configured before constructing a live client.
-
-Application setup will call the factory once and retain its returned client for
-injection into future nodes. The factory is not a global singleton or per-node
-cache. Tests can pass `client=fake` without settings, keys, provider imports, or
-network calls. The injection type is LangChain's `BaseChatModel`, supporting its
-fake chat model subclasses and test mocks. Neither factory path invokes a model.
-
-`load_settings()` reads the process environment. Dotenv loading is explicit:
-`load_settings(env_file=".env")`. Process values override file values, and parsing
-does not mutate the process environment. An explicit `environ={}` isolates tests.
-Missing requested files raise an error; there is no parent-directory discovery or
-dotenv variable interpolation.
+`create_model_client`. Groq is the only provider. The factory constructs one
+`langchain_groq.ChatGroq`; API lifespan injects it into SessionCoordinator,
+which passes it to the graph and agents. No node constructs a client.
+Injected offline clients bypass settings and provider imports unchanged.
 
 | Variable | Meaning |
 | --- | --- |
-| `LLM_PROVIDER` | Currently `google_genai` (default); other values rejected |
-| `LLM_MODEL` | Required nonblank model ID for live construction; no default |
-| `GOOGLE_API_KEY` | Required secret for live construction; omitted from settings dumps/repr |
+| `GROQ_MODEL` | Required nonblank Groq model ID; no default; must support tool calling |
+| `GROQ_API_KEY` | Required secret; excluded from settings dumps and repr |
 | `LLM_TIMEOUT_SECONDS` | Positive timeout up to 300 seconds; default 30 |
-| `LLM_MAX_RETRIES` | Provider request retries, 0–5, default 2; distinct from route replanning |
+| `LLM_MAX_RETRIES` | Request retries, 0?5; default 2 |
 
-Only `.env.example` placeholders belong in Git. Settings may be incomplete for
-offline injection; live construction checks required model/key first, then lazily
-imports `langchain-google-genai`. That optional package is not installed or added to the
-base requirements because this milestone needs only configuration and offline
-tests. The missing-package error explains the prerequisite for future live setup.
+`load_settings()` reads the process environment. Explicit
+`load_settings(env_file=".env")` also reads a dotenv file, with process values
+taking precedence. It does not mutate the environment or interpolate variables.
+Missing explicit files raise an error. Incomplete settings permit offline
+injection; live construction checks the model and key before importing ChatGroq.
+Only placeholder values belong in `.env.example`; `.env` stays ignored.
 
-Provider capability references checked September 16, 2026:
-[LangChain ChatGoogleGenerativeAI](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
-documents the integration package, tool calling, and structured output.
-[Google's Gemini model catalog](https://ai.google.dev/gemini-api/docs/models)
-is the source for choosing the concrete model ID before live use; no model is a
-permanent default or assumed available to the account. The factory explicitly
-passes `vertexai=False` to use the Gemini Developer API with `GOOGLE_API_KEY`,
-independent of ambient Vertex AI settings. This application uses only
-`GOOGLE_API_KEY`, rather than the SDK's alternate credential variable fallback.
-No live smoke test is implemented.
-
-The audit also verified the concrete stable example
-[`gemini-2.5-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash):
-Google documents both function calling and structured outputs. It remains a
-documentation example rather than a code default or a guarantee of account access.
-The optional provider package is not installed, so real client construction and
-live responses remain untested. Mocked construction and offline injection pass.
+`langchain-groq` is included in backend requirements.
+[ChatGroq documentation](https://docs.langchain.com/oss/python/integrations/chat/groq)
+describes the integration. Structured output explicitly uses `function_calling`
+and the Pydantic schema, returning a validated model. This requires a Groq model
+with tool calling, without requiring model-specific native JSON schema support.
+`scripts/test_groq_api.py` uses this same factory and OrderSelection wrapper for
+one live request. Live account access is verified separately from offline tests.
 
 ## Milestone C: Order Agent only
 
@@ -175,8 +154,8 @@ prefers creation order, but eligibility (not model compliance with that preferen
 is enforced in code; any returned pending ID is valid. No numeric priority exists.
 
 `app.config.structured_output` wraps the injected client using
-`with_structured_output(OrderSelection, method="json_schema")`. This requests
-Gemini native structured output with the Pydantic class. The agent revalidates
+`with_structured_output(OrderSelection, method="function_calling")`. This requests
+Groq tool-based structured output with the Pydantic class. The agent revalidates
 the result with Pydantic, then checks membership in pending IDs from the actual
 snapshot. The existing state validator provides an additional eligibility check.
 Shape validation alone cannot authorize a nonexistent or non-pending ID.
@@ -194,7 +173,7 @@ raised TimeoutError explicitly and other provider exceptions as generic failures
 it does not add a background timeout thread or retry loop. Process interrupts
 are not swallowed. Tests use a fake chat model implementing the structured-output
 boundary with real Pydantic JSON parsing, plus injected failure runnables. No
-Gemini integration package, credentials, or API calls are needed for these tests.
+credentials or API calls are needed for these tests.
 
 The Order-only increment added 21 tests. Production graph wiring remains unimplemented.
 
@@ -681,6 +660,6 @@ movement. Narrow service doubles cover HTTP-only failures and terminal failed
 outcome mapping; normal flows use the real coordinator and fake models.
 
 One installed Starlette/AnyIO deprecation warning remains; no tests failed and no
-warnings were suppressed. Live Gemini calls were not performed. Sessions remain
+warnings were suppressed. Live provider calls were not performed. Sessions remain
 process-local RAM only, lost on restart. No database, authentication, deployment,
 React or Milestone G functionality was added.

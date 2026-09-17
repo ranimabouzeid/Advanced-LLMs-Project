@@ -5,3 +5,4 @@ fastapi[standard]
 python-dotenv
 networkx
 pytest
+langchain-groq

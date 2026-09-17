@@ -30,7 +30,7 @@ def make_state(*, batteries=(100, 100, 100), statuses=("idle", "idle", "idle"),
 
 class FleetFake(FakeMessagesListChatModel):
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        assert schema is FleetSelection and method == "json_schema"
+        assert schema is FleetSelection and method == "function_calling"
         return self | RunnableLambda(lambda message: schema.model_validate_json(message.content))
 
 

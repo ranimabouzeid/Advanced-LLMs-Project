@@ -391,8 +391,8 @@ def test_cors(coordinator, monkeypatch, origins, environment, origin, allowed):
 
 
 def test_injected_coordinator_skips_model_factory_without_credentials(coordinator, monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
 
     def forbidden():
         pytest.fail("Live model factory must not run")

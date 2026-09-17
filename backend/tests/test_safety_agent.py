@@ -39,7 +39,7 @@ def change_warehouse(state, kind):
 
 class SummaryFake(FakeMessagesListChatModel):
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        assert schema is SafetyExplanation and method == "json_schema"
+        assert schema is SafetyExplanation and method == "function_calling"
         return self | RunnableLambda(lambda message: schema.model_validate_json(message.content))
 
 
