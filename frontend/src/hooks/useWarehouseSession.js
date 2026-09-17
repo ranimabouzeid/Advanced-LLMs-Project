@@ -1,0 +1,65 @@
+import { useEffect, useRef, useState } from 'react';
+import { api } from '../api/client';
+
+export function useWarehouseSession() {
+  const [session, setSession] = useState(null);
+  const [pendingAction, setPending] = useState('createSession');
+  const [lastCommand, setCommand] = useState(null);
+  const [httpError, setError] = useState(null);
+  const [replacementNotice, setReplacement] = useState(null);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const startup = useRef(null);
+  const current = useRef(null);
+  const active = useRef(true);
+  const lock = useRef(true);
+  const sequence = useRef(0);
+
+  useEffect(() => {
+    active.current = true;
+    let subscribed = true;
+    // The same promise survives Strict Mode's effect cleanup/setup cycle.
+    startup.current ??= api.createSession();
+    startup.current.then(result => {
+      if (subscribed) { current.current = result; setSession(result); }
+    }).catch(error => { if (subscribed) setError(error); })
+      .finally(() => { if (subscribed) { lock.current = false; setPending(null); } });
+    return () => { subscribed = false; active.current = false; };
+  }, []);
+
+  async function run(action, payload) {
+    if (lock.current || !active.current) return false;
+    const oldId = current.current?.session_id;
+    if (action !== 'createSession' && !oldId) return false;
+    lock.current = true;
+    const ticket = ++sequence.current;
+    setPending(action);
+    setError(null);
+    try {
+      const result = await (action === 'createSession' ? api.createSession() : api[action](oldId, payload));
+      if (!active.current || sequence.current !== ticket || current.current?.session_id !== oldId) return false;
+      if (!['reset', 'createSession'].includes(action) && result.session_id !== oldId) {
+        throw new Error('Unexpected session response. Refresh committed state.');
+      }
+      current.current = result;
+      setSession(result);
+      if (action === 'plan' || action === 'execute') {
+        setCommand({ action, outcome: result.outcome, error: result.error });
+        setReplacement(action === 'execute' && result.outcome === 'ready' &&
+          result.state.execution_requested === false ? result.state.delivery_plan?.warehouse_revision ?? 0 : null);
+      } else if (action !== 'refresh') {
+        setCommand(null); setReplacement(null);
+      } else if (!result.state.delivery_plan || result.state.delivery_plan.warehouse_revision !== replacementNotice) {
+        setReplacement(null);
+      }
+      if (action === 'reset' || action === 'createSession') setSelectedCell(null);
+      return true;
+    } catch (error) {
+      if (active.current && sequence.current === ticket) setError(error);
+      return false;
+    } finally {
+      if (active.current && sequence.current === ticket) { lock.current = false; setPending(null); }
+    }
+  }
+  return { session, pendingAction, lastCommand, httpError, replacementNotice,
+    selectedCell, setSelectedCell, run };
+}

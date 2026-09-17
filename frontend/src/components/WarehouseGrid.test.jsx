@@ -1,0 +1,48 @@
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { expect, it, vi } from 'vitest';
+import WarehouseGrid from './WarehouseGrid';
+import { initial, ready, blocked } from '../test/fixtures';
+const draw = (state = initial) => render(<WarehouseGrid state={state} selectedCell={null} onSelect={vi.fn()} />);
+it('renders 100 cells in x-right y-down order', () => {
+  const { container } = draw(); const cells = container.querySelectorAll('[data-cell]');
+  expect(cells).toHaveLength(100); expect(cells[0]).toHaveAttribute('data-cell','0,0');
+  expect(cells[9]).toHaveAttribute('data-cell','9,0'); expect(cells[10]).toHaveAttribute('data-cell','0,1'); expect(cells[99]).toHaveAttribute('data-cell','9,9');
+});
+it('renders shelf, robot, dropoff and blocked objects', () => {
+  draw(blocked); expect(screen.getAllByRole('button', { name: /shelf/ })).toHaveLength(initial.warehouse.obstacles.length);
+  expect(screen.getByRole('button', { name: /robot-1/ })).toBeVisible();
+  expect(screen.getAllByRole('button', { name: /drop-off/ })).toHaveLength(2);
+  expect(screen.getByRole('button', { name: /Cell \(5, 0\).*blocked/ })).toHaveClass('blocked');
+});
+it.each(['pending','assigned'])('shows %s package at pickup', status => {
+  const s=structuredClone(ready); s.warehouse.orders[0].status=status; draw(s);
+  expect(screen.getByRole('button', { name: /Cell \(2, 0\).*package p/ })).toBeVisible();
+});
+it.each(['picked_up','delivered'])('does not leave %s package at pickup', status => {
+  const s=structuredClone(ready); s.warehouse.orders[0].status=status; draw(s);
+  expect(screen.queryByRole('button', { name: /package p/ })).not.toBeInTheDocument();
+});
+it('groups packages and identifies a carrying selected robot', () => {
+  const s=structuredClone(ready); s.warehouse.orders.push({ ...s.warehouse.orders[0], id:'other',package:{id:'p2',pickup:{x:2,y:0}} });
+  s.warehouse.robots[0].carried_package_id='carried'; const { container }=draw(s);
+  expect(screen.getByRole('button',{name:/package p, package p2/})).toBeVisible();
+  expect(screen.getByRole('button',{name:/robot-1 carrying carried/})).toBeVisible();
+  expect(container.querySelector('.selected-robot')).toBeVisible();
+});
+it('draws both endpoint-inclusive route arrays at cell centers', () => {
+  draw(ready); expect(screen.getByTestId('pickup-route').querySelector('polyline')).toHaveAttribute('points','0.5,0.5 1.5,0.5 2.5,0.5');
+  expect(screen.getByTestId('delivery-route').querySelector('polyline')).toHaveAttribute('points',ready.delivery_plan.delivery_route.map(p=>`${p.x+.5},${p.y+.5}`).join(' '));
+});
+it('retains separate layers for shared segments and one-cell endpoints', () => {
+  const s=structuredClone(ready); s.delivery_plan.delivery_route=s.delivery_plan.pickup_route;
+  const { rerender }=draw(s); expect(screen.getAllByTestId(/-route/)).toHaveLength(2);
+  s.delivery_plan.pickup_route=[{x:0,y:0}]; rerender(<WarehouseGrid state={s} onSelect={()=>{}} />);
+  expect(screen.getByTestId('pickup-route').querySelector('circle')).toHaveAttribute('cx','0.5');
+});
+it('marks stale routes explicitly', () => { draw(blocked); expect(screen.getByText(/Stale route/)).toBeVisible(); });
+it('supports keyboard cell selection without mutation', async () => {
+  const select=vi.fn(); render(<WarehouseGrid state={initial} onSelect={select} />);
+  screen.getByRole('button',{name:/Cell \(5, 0\)/}).focus(); await userEvent.keyboard('{Enter}');
+  expect(select).toHaveBeenCalledWith({x:5,y:0});
+});
