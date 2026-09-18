@@ -3,12 +3,12 @@
 import pytest
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from app.graph.state import (OrderSelection, FleetSelection, RouteIntent, LLMRoutePlan, SafetyDecision,
+from app.graph.state import (OrderSelection, FleetSelection, LLMRoutePlan, SafetyDecision,
                              RobotForecast, PlannedDelivery, LLMMovementPlan, PlannedParking, RobotSchedule)
 from app.warehouse.movement import MovementPlan
 
 
-@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, RouteIntent, LLMRoutePlan, SafetyDecision,
+@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, LLMRoutePlan, SafetyDecision,
                                     RobotForecast, PlannedDelivery, LLMMovementPlan, PlannedParking,
                                     RobotSchedule, MovementPlan])
 def test_model_and_field_guidance_is_exported(model):
@@ -21,7 +21,7 @@ def test_model_and_field_guidance_is_exported(model):
         assert description.lower() not in (name, model.__name__.lower())
 
 
-@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, RouteIntent, LLMRoutePlan, SafetyDecision, LLMMovementPlan])
+@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, SafetyDecision])
 def test_groq_tool_schema_keeps_the_model_guidance(model):
     exported = model.model_json_schema()
     tool = convert_to_openai_tool(model)["function"]
@@ -61,11 +61,7 @@ def test_fleet_schema_requires_trusted_minimum_cost_without_previous_assignment_
     assert "Previous assignments create no preference" in description
 
 
-def test_hybrid_route_and_safety_schemas_separate_intent_from_hard_facts():
-    route = RouteIntent.model_json_schema()
-    assert "A* computes every path coordinate" in route["description"]
-    assert "never a coordinate path" in route["properties"]["avoid_cells"]["description"]
-    assert "route_to_pickup" not in route["properties"] and "route" not in route["properties"]
+def test_hybrid_safety_schema_preserves_hard_facts():
     safety = SafetyDecision.model_json_schema()
     assert "trusted deterministic findings" in safety["description"]
     assert "hard failures require false" in safety["properties"]["approved"]["description"]

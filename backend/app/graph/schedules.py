@@ -4,7 +4,7 @@ import logging
 
 from . import batch
 from .agents import route_agent, safety_agent, parking_route, parking_safety
-from .state import NodeActivity, PlannedDelivery, PlannedParking, RobotSchedule, RouteRetryFeedback, WarehouseGraphState
+from .state import NodeActivity, PlannedDelivery, PlannedParking, RobotSchedule, WarehouseGraphState
 from app.warehouse.models import WarehouseState
 from app.warehouse.movement import execute_parking
 
@@ -13,7 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 class ScheduleUnavailable(ValueError):
-    """A public planning limitation, distinct from provider/infrastructure errors."""
+    """A typed planning rejection, distinct from provider/infrastructure errors."""
+
+    def __init__(self, message, *, outcome="failed"):
+        super().__init__(message)
+        self.outcome = outcome
 
 
 def project_parking(warehouse, plan):
@@ -38,7 +42,7 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
     """Finalize assignment forecasts into sequential robot schedules without committed movement.
 
     Each robot chains drop-off -> next pickup, then parks once after its last
-    assignment. Route/Safety use the shared LLM with bounded retries. A failed
+    assignment. Route uses deterministic A* and Safety independently reviews it. A failed
     finalization leaves no actionable partial schedule.
     """
     assignments = [item for item in state.planned_deliveries if item.status == "approved"]
@@ -60,69 +64,59 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
                            "next_order_id": next_item.order_id if next_item else None,
                            "departure": "next_pickup" if next_item else "parking/staging"}
                 local = WarehouseGraphState(warehouse=warehouse, command="plan",
-                    route_retry_feedback=state.route_retry_feedback,
                     order_selection=item.selection, selected_robot_id=robot_id,
                     node_activity=activity, replan_count=count, max_replans=state.max_replans)
-                while True:
-                    update = route_agent(local, client=client, tools=route_tools, schedule_context=context)
-                    local = WarehouseGraphState.model_validate({**local.model_dump(), **update, "replan_count": count})
-                    activity = local.node_activity
-                    if local.run_outcome != "running":
-                        raise ScheduleUnavailable("Final delivery route unavailable")
-                    update = safety_agent(local, client=client, tools=safety_tools, schedule_context=context)
-                    local = WarehouseGraphState.model_validate({**local.model_dump(), **update})
-                    activity = local.node_activity
-                    if local.safety is None:
-                        raise ValueError("Final safety decision unavailable")
-                    if local.safety.approved:
-                        break
-                    if count >= state.max_replans:
-                        raise ScheduleUnavailable("Schedule replan limit exhausted")
-                    count += 1
-                    local = WarehouseGraphState.model_validate({**local.model_dump(), "replan_count": count})
+                update = route_agent(local, tools=route_tools)
+                local = WarehouseGraphState.model_validate({**local.model_dump(), **update, "replan_count": count})
+                activity = local.node_activity
+                if local.planning_outcome == "unreachable":
+                    raise ScheduleUnavailable("Final delivery route unreachable", outcome="unreachable")
+                if local.run_outcome != "running":
+                    raise ValueError("Final delivery planner failed")
+                update = safety_agent(local, client=client, tools=safety_tools, schedule_context=context)
+                local = WarehouseGraphState.model_validate({**local.model_dump(), **update})
+                activity = local.node_activity
+                if local.safety is None:
+                    raise ValueError("Final safety decision unavailable")
+                if not local.safety.approved:
+                    raise ScheduleUnavailable("Safety rejected delivery; routing constraints must change before replanning")
                 record = PlannedDelivery(order_id=item.order_id, selection=item.selection,
                     robot_id=robot_id, delivery_plan=local.delivery_plan, safety=local.safety, status="approved")
                 records.append(record)
                 warehouse = batch.project(warehouse, record.delivery_plan)
             target = parking_target(warehouse, robot_id, reserved)
             if target is None:
-                raise ScheduleUnavailable("No free parking cell; schedule cannot be finalized")
-            previous = feedback = None
-            inherited = next((item for item in reversed(state.route_retry_feedback)
-                              if item.robot_id == robot_id and item.order_id is None), None)
-            if inherited:
-                previous, feedback = inherited.previous_route, inherited.safety
-            while True:
-                plan = parking_route(warehouse, robot_id, target, client=client, previous=previous, feedback=feedback, tools=route_tools)
-                activity = (*activity, NodeActivity(node="route", status="completed", message="Final parking route proposed"))
-                feedback = parking_safety(warehouse, plan, client=client, tools=safety_tools,
-                                          expected_target=target, reserved_cells=reserved)
-                activity = (*activity, NodeActivity(node="safety", status="completed" if feedback.approved else "rejected",
-                                                    message=feedback.explanation))
-                if feedback.approved:
-                    break
-                if count >= state.max_replans:
-                    raise ScheduleUnavailable("Parking replan limit exhausted")
-                count += 1
-                previous = plan
+                raise ScheduleUnavailable("No free parking cell; schedule cannot be finalized", outcome="unreachable")
+            plan = parking_route(warehouse, robot_id, target, tools=route_tools)
+            if plan is None:
+                raise ScheduleUnavailable("Final parking route unreachable", outcome="unreachable")
+            activity = (*activity, NodeActivity(node="route", status="completed", message="Final A* parking route proposed"))
+            feedback = parking_safety(warehouse, plan, client=client, tools=safety_tools,
+                                      expected_target=target, reserved_cells=reserved)
+            activity = (*activity, NodeActivity(node="safety", status="completed" if feedback.approved else "rejected",
+                                                message=feedback.explanation))
+            if not feedback.approved:
+                raise ScheduleUnavailable("Safety rejected parking; routing constraints must change before replanning")
             warehouse = project_parking(warehouse, plan)
             reserved.add(target)
             schedules.append(RobotSchedule(robot_id=robot_id, order_ids=tuple(item.order_id for item in group),
                 parking=PlannedParking(plan=plan, safety=feedback),
                 projected_robot=next(r for r in warehouse.robots if r.id == robot_id)))
     except Exception as exc:
-        logger.exception("Schedule finalization failed")
+        expected = isinstance(exc, ScheduleUnavailable)
+        if not expected:
+            logger.exception("Schedule finalization failed")
+        outcome = exc.outcome if expected else "failed"
         # Provider details and partially finalized proposals never become actionable.
         reason = str(exc) if isinstance(exc, ScheduleUnavailable) else "Schedule finalization failed; no execution permitted"
         records = tuple(PlannedDelivery.model_validate({**item.model_dump(), "status": "unplannable", "reason": reason})
                         if item.status == "approved" else item for item in state.planned_deliveries)
         return dict(planned_deliveries=records, robot_schedules=(), robot_forecasts=(),
-            route_retry_feedback=(),
             projected_warehouse=None, planning_queue=(), planning_index=0,
             order_selection=None, selected_robot_id=None, delivery_plan=None, safety=None,
-            execution_requested=False, planning_outcome="failed", run_outcome="failed",
+            execution_requested=False, planning_outcome=outcome, run_outcome=outcome,
             replan_count=count, error_message=reason,
-            node_activity=(*activity, NodeActivity(node="route", status="failed", message=reason)))
+            node_activity=(*activity, NodeActivity(node="route", status="rejected" if expected else "failed", message=reason)))
     records.extend(item for item in state.planned_deliveries if item.status != "approved")
     candidate = WarehouseGraphState.model_validate({**state.model_dump(), "planned_deliveries": records,
         "robot_schedules": schedules, "node_activity": activity, "replan_count": count})
@@ -134,20 +128,27 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
 def review(state, *, client, safety_tools=None):
     """Reassess every finalized delivery and parking leg with the LLM before execution.
 
-    Rejection or revision mismatch requests a review-only replacement; provider
+    A changed warehouse revision permits a review-only replacement. Unchanged
+    constraints with a Safety rejection stop without rerunning A*. Provider
     failures stop the command. All intermediate warehouse changes are projected.
     """
     warehouse, activity = state.warehouse, state.node_activity
     records, schedules = [], []
     by_id = {item.order_id: item for item in state.planned_deliveries}
 
-    def rejected(message, plan, decision):
-        """Request bounded replacement planning with execution intent revoked."""
-        return dict(run_outcome="failed", execution_requested=False, planning_outcome="stale",
-                    route_retry_feedback=(*state.route_retry_feedback, RouteRetryFeedback(
-                        robot_id=plan.robot_id, order_id=getattr(plan, "order_id", None),
-                        previous_route=plan, safety=decision)),
-                    error_message=message, node_activity=activity, safety=None)
+    def rejected(message):
+        """Only changed runtime inputs justify automatic deterministic replanning."""
+        changed = state.batch_revision != state.warehouse_revision
+        return dict(run_outcome="failed", execution_requested=False,
+                    planning_outcome="stale" if changed else "failed",
+                    error_message=message if changed else "Safety rejected schedule; routing constraints unchanged",
+                    node_activity=activity, safety=None,
+                    planned_deliveries=tuple(PlannedDelivery.model_validate({**item.model_dump(),
+                        "status": "stale", "safety": None, "reason": "Schedule review rejected"})
+                        if item.status == "approved" else item for item in state.planned_deliveries),
+                    robot_schedules=tuple(RobotSchedule.model_validate({**item.model_dump(),
+                        "parking": {**item.parking.model_dump(), "status": "stale", "safety": None,
+                                    "reason": "Schedule review rejected"}}) for item in state.robot_schedules))
 
     try:
         for schedule in state.robot_schedules:
@@ -165,7 +166,7 @@ def review(state, *, client, safety_tools=None):
                 if activity[-1].status == "failed":
                     return {**update, "node_activity": activity}
                 if item.delivery_plan.warehouse_revision != warehouse.revision or not update["safety"].approved:
-                    return rejected("Delivery requires a new schedule and review", item.delivery_plan, update["safety"])
+                    return rejected("Delivery requires a new schedule and review")
                 records.append(PlannedDelivery.model_validate({**item.model_dump(), "safety": update["safety"],
                                                                "status": "approved", "reason": None}))
                 warehouse = batch.project(warehouse, item.delivery_plan)
@@ -174,7 +175,7 @@ def review(state, *, client, safety_tools=None):
             activity = (*activity, NodeActivity(node="safety", status="completed" if decision.approved else "rejected",
                                                 message=decision.explanation))
             if parking.plan.warehouse_revision != warehouse.revision or not decision.approved:
-                return rejected("Parking requires a new schedule and review", parking.plan, decision)
+                return rejected("Parking requires a new schedule and review")
             warehouse = project_parking(warehouse, parking.plan)
             schedules.append(RobotSchedule.model_validate({**schedule.model_dump(),
                 "parking": {**parking.model_dump(), "safety": decision, "status": "approved", "reason": None}}))

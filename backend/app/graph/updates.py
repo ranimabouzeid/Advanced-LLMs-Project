@@ -9,14 +9,13 @@ from typing import Literal, TypedDict
 from app.warehouse.models import DeliveryPlan, OrderStatus, WarehouseState
 
 from .state import NodeActivity, OrderSelection, PlannedDelivery, SafetyDecision, PlanningOutcome, RunOutcome, WarehouseGraphState
-from .state import RobotForecast, RobotSchedule, RouteRetryFeedback
+from .state import RobotForecast, RobotSchedule
 
 
 class StateUpdate(TypedDict, total=False):
     """Only the shared-state fields explicitly owned or invalidated by one workflow step."""
     robot_forecasts: tuple[RobotForecast, ...]
     robot_schedules: tuple[RobotSchedule, ...]
-    route_retry_feedback: tuple[RouteRetryFeedback, ...]
     planned_deliveries: tuple[PlannedDelivery, ...]
     batch_revision: int | None
     projected_warehouse: WarehouseState | None
@@ -110,7 +109,6 @@ def replace_warehouse(state: WarehouseGraphState, warehouse: WarehouseState) -> 
                                error_message=None, run_outcome="idle",
                                planning_outcome="stale" if state.delivery_plan else "not_planned")
     update.update(projected_warehouse=None, planning_queue=(), planning_index=0,
-                  route_retry_feedback=(),
                   robot_forecasts=(),
                   robot_schedules=tuple(RobotSchedule.model_validate({**s.model_dump(),
                       "parking": {**s.parking.model_dump(), "status": "stale", "safety": None,
@@ -161,7 +159,7 @@ def route_result(state: WarehouseGraphState, *, plan: DeliveryPlan | None = None
         raise ValueError("Failed planning requires an error")
     update = fresh_plan(state, plan) if plan is not None else _clear_proposal()
     record = NodeActivity(node="route", status="failed" if outcome == "failed" else "completed",
-                          message=error or explanation or ("A* route proposed after LLM intent" if plan is not None
+                          message=error or explanation or ("Deterministic A* route proposed" if plan is not None
                                            else "A* reports pickup or drop-off unreachable"))
     update.update(planning_outcome=outcome,
                   run_outcome="running" if outcome == "planned" else outcome,

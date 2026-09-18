@@ -16,7 +16,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.graph.graph import build_graph
 from app.graph.state import NodeActivity, OrderSelection, PlannedDelivery, SafetyDecision, WarehouseGraphState
-from app.graph.state import RobotForecast, RobotSchedule, PlannedParking, RouteRetryFeedback
+from app.graph.state import RobotForecast, RobotSchedule, PlannedParking
 from app.warehouse.movement import MovementPlan
 from app.graph.updates import replace_warehouse
 from app.warehouse import (
@@ -86,7 +86,7 @@ class SessionCoordinator:
     def __init__(self, *, client: BaseChatModel):
         serializer = JsonPlusSerializer(pickle_fallback=False, allowed_msgpack_modules=[
             WarehouseGraphState, OrderSelection, PlannedDelivery, SafetyDecision, NodeActivity, WarehouseState,
-            RobotForecast, RobotSchedule, PlannedParking, MovementPlan, RouteRetryFeedback,
+            RobotForecast, RobotSchedule, PlannedParking, MovementPlan,
             DeliveryPlan, ValidationResult, ValidationIssue, RobotConflict,
             Order, OrderStatus, Package, Position, Robot, RobotStatus,
         ])

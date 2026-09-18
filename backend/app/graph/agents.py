@@ -1,4 +1,4 @@
-"""Shared-client Order LLM and hybrid Fleet, Route and Safety roles."""
+"""Order LLM, hybrid Fleet/Safety, and deterministic A* Route roles."""
 
 import json
 import logging
@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.config import structured_output
 from app.warehouse.models import DeliveryPlan
-from .state import FleetSelection, RouteIntent, OrderSelection, SafetyDecision, WarehouseGraphState
+from .state import FleetSelection, OrderSelection, SafetyDecision, WarehouseGraphState
 from .tools import FleetTools, OrderTools, RouteTools, SafetyTools
 from .updates import StateUpdate, fleet_result, order_result, route_result, safety_result
 
@@ -62,7 +62,7 @@ def order_agent(state: WarehouseGraphState, *, client: BaseChatModel,
 
 def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
                 tools: FleetTools | None = None) -> StateUpdate:
-    """Select through the LLM using exact A* costs for all projected robots.
+    """Use trusted A* candidate costs with Groq reasoning and minimum-cost validation.
 
     Reusing a robot is valid only as a new model choice; committed state is unchanged.
     """
@@ -118,56 +118,23 @@ def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
         return fleet_result(state, outcome="failed", message="Fleet model or structured input/output failed")
 
 
-def _routing_intent(client, context, *, robot_id, order_id, route_type):
-    """Require Groq intent before planning; trusted runtime owns IDs and endpoints."""
-    expected = dict(robot_id=robot_id, order_id=order_id, route_type=route_type)
-    context["expected_intent"] = expected
-    intent = _decide(client, RouteIntent,
-        "You choose routing intent only, never exact coordinate paths or distance math. "
-        "Match expected_intent and use trusted endpoints. delivery means robot to pickup then "
-        "pickup to drop-off; continuation starts at a prior drop-off and goes directly to the "
-        "next pickup then drop-off; parking means final empty-robot departure to reserved staging. "
-        "Packages remain delivered at drop-off; idle robots finish at staging. A* generates the "
-        "shortest path under trusted obstacles and your additional avoid_cells. Only add avoid "
-        "constraints justified by supplied context or Safety feedback. On rejection, acknowledge "
-        "the feedback and explain your corrective intent; A* will run afresh even if the shortest "
-        "path is unchanged. Do not change assignments, approve safety or execute movement.", context)
-    if any(getattr(intent, field) != value for field, value in expected.items()):
-        raise ValueError("Routing intent does not match trusted assignment")
-    if context.get("safety_feedback") and not intent.retry_feedback_acknowledged:
-        raise ValueError("Routing intent must acknowledge Safety retry feedback")
-    return intent
+def route_agent(state: WarehouseGraphState, *, tools: RouteTools | None = None) -> StateUpdate:
+    """Generate exact shortest delivery legs from projected state with deterministic A*.
 
-
-def route_agent(state: WarehouseGraphState, *, client: BaseChatModel,
-                tools: RouteTools | None = None, schedule_context: dict | None = None) -> StateUpdate:
-    """Groq interprets the objective/feedback; A* authors both exact delivery legs."""
+    Fleet owns the assignment. Planning never mutates committed state or calls a
+    model; unchanged inputs produce the same path, not a new routing strategy.
+    """
     if state.order_selection is None or state.selected_robot_id is None:
         return route_result(state, outcome="failed", error="Route requires a selected order and robot")
     tools = tools if tools is not None else RouteTools()
     try:
-        context = tools.grid_context(state.warehouse, state.order_selection.order_id, state.selected_robot_id)
-        inherited = next((item for item in reversed(state.route_retry_feedback)
-                          if item.robot_id == state.selected_robot_id and item.order_id == state.order_selection.order_id), None)
-        context.update(previous_route=state.delivery_plan.model_dump(mode="json") if state.delivery_plan else None,
-                       safety_feedback=state.safety.model_dump(mode="json") if state.safety and not state.safety.approved else None,
-                       replan_count=state.replan_count,
-                       schedule_context=schedule_context or {"phase": "assignment_preview" if state.robot_forecasts else "delivery",
-                                                            "departure": "finalized_after_assignments"})
-        if not context["safety_feedback"] and inherited:
-            context.update(previous_route=inherited.previous_route.model_dump(mode="json"),
-                           safety_feedback=inherited.safety.model_dump(mode="json"))
-        robot = next(r for r in state.warehouse.robots if r.id == state.selected_robot_id)
-        kind = "continuation" if robot.position in state.warehouse.dropoff_locations else "delivery"
-        intent = _routing_intent(client, context, robot_id=robot.id,
-                                 order_id=state.order_selection.order_id, route_type=kind)
-        plan = tools.plan_delivery(state.warehouse, intent.order_id, intent.robot_id, intent.avoid_cells)
+        plan = tools.plan_delivery(state.warehouse, state.order_selection.order_id, state.selected_robot_id)
         if plan is None:
-            return route_result(state, outcome="unreachable", explanation="A* found no route under the supplied constraints")
-        return route_result(state, outcome="planned", plan=plan, explanation=intent.explanation)
+            return route_result(state, outcome="unreachable", explanation="A* found no pickup or delivery route under current constraints")
+        return route_result(state, outcome="planned", plan=plan, explanation="Shortest feasible A* delivery route")
     except Exception:
-        logger.exception("Route agent failed")
-        return route_result(state, outcome="failed", error="Route model, intent or planner failed")
+        logger.exception("Deterministic Route planner failed")
+        return route_result(state, outcome="failed", error="Deterministic Route planner failed")
 
 
 def _safety_decision(client, context, findings):
@@ -178,7 +145,8 @@ def _safety_decision(client, context, findings):
         "currently supplied delivery or parking route and its projected schedule context. "
         "Hard failures cannot be overridden: if route_valid is false you must reject. If hard "
         "checks pass you may approve or reject with specific contextual reasons. Include affected "
-        "leg, cells, robots and corrective intent for Route retry. Do not invent contrary facts, "
+        "leg, cells, robots and the constraints that must change before replanning. "
+        "Route is deterministic: unchanged inputs cannot produce a different path. Do not invent contrary facts, "
         "construct replacement coordinates or execute movement. Drop-off is temporary: the "
         "package remains delivered while the robot continues to its next pickup or final parking. "
         "Your approval applies only to this route, not unreviewed later movements.", context)
@@ -195,7 +163,7 @@ def _safety_decision(client, context, findings):
 
 def safety_agent(state: WarehouseGraphState, *, client: BaseChatModel,
                  tools: SafetyTools | None = None, schedule_context: dict | None = None) -> StateUpdate:
-    """Inspect the delivery deterministically, then ask Groq; hard failures veto approval."""
+    """Interpret deterministic safety findings with Groq while preserving hard-rule enforcement."""
     if state.delivery_plan is None:
         return safety_result(state, error="Safety requires a delivery plan")
     tools = tools if tools is not None else SafetyTools()
@@ -215,17 +183,13 @@ def safety_agent(state: WarehouseGraphState, *, client: BaseChatModel,
         return safety_result(state, error="Safety model or structured input/output failed")
 
 
-def parking_route(warehouse, robot_id, target, *, client, previous=None, feedback=None, tools=None):
-    """Groq specifies departure intent; A* generates a fresh path to reserved staging."""
+def parking_route(warehouse, robot_id, target, *, tools=None):
+    """Return the shortest final staging departure, or None when unreachable.
+
+    The target is reserved by scheduling; Route never assigns robots or calls Groq.
+    """
     tools = tools if tools is not None else RouteTools()
-    context = {"warehouse": warehouse.model_dump(mode="json"), "robot_id": robot_id,
-               "target": target.model_dump(), "previous_route": previous.model_dump(mode="json") if previous else None,
-               "safety_feedback": feedback.model_dump(mode="json") if feedback else None}
-    intent = _routing_intent(client, context, robot_id=robot_id, order_id=None, route_type="parking")
-    plan = tools.plan_parking(warehouse, robot_id, target, intent.avoid_cells)
-    if plan is None:
-        raise ValueError("A* found no parking route under the supplied constraints")
-    return plan
+    return tools.plan_parking(warehouse, robot_id, target)
 
 
 def parking_safety(warehouse, plan, *, client, tools=None, expected_target=None, reserved_cells=()):

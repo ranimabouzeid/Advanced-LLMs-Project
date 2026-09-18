@@ -11,11 +11,11 @@ process-local checkpointed sessions, a thin FastAPI service, and a React dashboa
 Plan builds a sequential batch using projected robot positions and batteries;
 Execute revalidates deliveries and final parking. Drop-offs are temporary service
 cells: packages stay delivered while robots chain to their next pickup or park.
-All four agents use one shared
-Groq client: Order selects orders, Fleet selects robots, Route chooses routing intent,
-and Safety interprets trusted findings. Fleet is hybrid: exact A* delivery costs constrain
-the Groq choice to feasible minima, with one corrective retry for invalid choices.
-Route uses A* after Groq intent; Safety hard-check failures veto LLM approval.
+Order, Fleet and Safety use one shared Groq client. Order selects orders; hybrid
+Fleet combines fresh exact A* candidate costs with a Groq selection and minimum-cost
+validation, including one corrective retry for invalid choices. Route remains a
+LangGraph node and generates exact shortest paths using deterministic A*, with no
+Groq call. Hybrid Safety interprets trusted findings and enforces every hard failure.
 Deterministic simulation still guards actual execution.
 
 ## Run tests (Windows)
@@ -35,9 +35,13 @@ See [API startup](docs/environment.md#milestone-f-api) and
 See [batch planning and execution](docs/architecture.md#sequential-multi-order-batch-planning-current-workflow)
 for state ownership, partial failure policy, and the route selector.
 
-Current hybrid agents verification: **594 backend tests and 58 frontend tests pass**;
-frontend build, pip check, and git diff --check pass. Earlier counts above are
-historical. Model decisions are mocked in tests; no live call was made. LLM intent
-can add restrictive constraints and Safety may reject a valid route. Hard failures
-cannot be approved, and deterministic execution rechecks current state. See the current workflow architecture for retry,
-review, projection, and partial-commit behavior.
+The current architecture preserves fresh projected Fleet decisions, direct same-batch
+chaining, unique final parking, and checkpoint isolation. Identical routing inputs
+are not retried after Safety rejection; changed warehouse inputs permit bounded
+replacement planning followed by explicit Execute. Expected unreachable paths return
+typed outcomes, while unexpected failures retain server-side diagnostics and generic
+API errors. See the current workflow architecture for details and limitations.
+
+Verification: **590 offline backend tests and 58 frontend tests pass**. The frontend
+build, pip check and git diff --check pass. The existing Starlette deprecation warning
+remains. Restart the backend after this schema change; sessions are process-local.

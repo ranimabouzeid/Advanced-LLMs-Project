@@ -306,8 +306,7 @@ def test_invalid_later_route_rejects_batch_before_any_delivery():
     records[1]["delivery_plan"]["pickup_route"] = (p(8, 8).model_dump(), *route[1:])
     tampered = merge(ready, {"planned_deliveries": records, "command": "execute"})
     result = run(tampered)
-    assert result.run_outcome == "ready" and result.warehouse == ready.warehouse
-    assert all(item.status == "approved" for item in result.planned_deliveries)
-    assert result.replan_count == 1 and not result.execution_requested
-    assert run(result).run_outcome == "delivered"
+    assert result.run_outcome == "failed" and result.warehouse == ready.warehouse
+    assert all(item.status == "stale" for item in result.planned_deliveries)
+    assert result.replan_count == 0 and not result.execution_requested
     assert not any(item.node == "execution" for item in result.node_activity)

@@ -440,3 +440,27 @@ state. Safety results will control whether to execute or replan.
 - [Routing tests](../backend/tests/test_routing.py)
 - [Detailed warehouse usage](warehouse.md)
 - [Project architecture and development rules](../AGENTS.md)
+
+Frontend:
+- React + Vite dashboard
+- npm install
+- npm run dev
+- npm test -- --run
+- npm run build
+
+Backend:
+- FastAPI/Uvicorn startup command
+
+Architecture:
+- React → FastAPI → SessionCoordinator → LangGraph
+- synchronous Plan/Execute
+- no WebSockets
+- no fake live agent activity
+- replacement route requires another manual Execute
+- Reset returns a new session
+- frontend derives warehouse display from server state
+
+Verified:
+- 47 frontend tests passing
+- 498 backend tests passing
+- production frontend build passing

@@ -31,19 +31,17 @@ def after_fleet(state: WarehouseGraphState) -> str:
 
 
 def after_route(state: WarehouseGraphState) -> str:
-    """Review model-authored coordinates, or record an unreachable assignment."""
+    """Review deterministic A* coordinates, or record an unreachable assignment."""
     if state.run_outcome == "unreachable":
         return "collect"
     return "safety" if state.run_outcome == "running" else "failure"
 
 
 def after_safety(state: WarehouseGraphState) -> str:
-    """Route on LLM approval, bounded rejection retries, or stale schedule replacement."""
+    """Execute approved schedules or replace stale schedules within the bounded budget."""
     if state.node_activity and state.node_activity[-1].status == "failed":
         return "failure"
     if state.projected_warehouse is not None:
-        if state.safety is not None and not state.safety.approved:
-            return "retry_route" if state.replan_count < state.max_replans else "collect"
         return "collect"
     if state.run_outcome == "ready" and state.execution_requested:
         return "execution"
@@ -67,9 +65,8 @@ def build_graph(*, client: BaseChatModel, order_tools: OrderTools | None = None,
     graph.add_node("dispatch", batch.dispatch)
     graph.add_node("order", partial(batch.order, client=client, tools=order_tools))
     graph.add_node("fleet", partial(batch.fleet, client=client, tools=fleet_tools))
-    graph.add_node("route", partial(batch.route, client=client, tools=route_tools))
+    graph.add_node("route", partial(batch.route, tools=route_tools))
     graph.add_node("safety", partial(batch.safety, client=client, tools=safety_tools))
-    graph.add_node("retry_route", partial(batch.retry_route, client=client, tools=route_tools))
     graph.add_node("collect", batch.collect)
     graph.add_node("finish", partial(finalize, client=client, route_tools=route_tools, safety_tools=safety_tools))
     graph.add_node("replan", batch.replan)
@@ -81,8 +78,7 @@ def build_graph(*, client: BaseChatModel, order_tools: OrderTools | None = None,
         ("order", after_order, ["fleet", "finish", "failure"]),
         ("fleet", after_fleet, ["route", "collect", "failure"]),
         ("route", after_route, ["safety", "collect", "failure"]),
-        ("retry_route", after_route, ["safety", "collect", "failure"]),
-        ("safety", after_safety, ["collect", "execution", "replan", "retry_route", "failure"]),
+        ("safety", after_safety, ["collect", "execution", "replan", "failure"]),
         ("collect", after_collect, ["order", "finish"]),
     ):
         graph.add_conditional_edges(node, selector, destinations)

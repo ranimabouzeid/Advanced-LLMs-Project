@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
-from app.graph.state import FleetSelection, RouteIntent, OrderSelection, SafetyDecision
+from app.graph.state import FleetSelection, OrderSelection, SafetyDecision
 
 
 class Fake(FakeMessagesListChatModel):
@@ -40,10 +40,6 @@ def automatic(schema, data):
         feasible = [c for c in data["candidates"] if c["feasible"]]
         chosen = min(feasible, key=lambda c: (c["total_cost"], c["robot"]["id"])) if feasible else None
         return schema(robot_id=chosen["robot"]["id"] if chosen else None, explanation="Mock minimum-cost choice" if chosen else "No feasible candidate: unavailable, unreachable or insufficient battery")
-    if schema is RouteIntent:
-        return schema(**data["expected_intent"],
-                      retry_feedback_acknowledged=bool(data.get("safety_feedback")),
-                      explanation="Mock intent uses trusted endpoints and acknowledges supplied feedback")
     if schema is SafetyDecision:
         facts = data["trusted_findings"]
         approved = facts["route_valid"]

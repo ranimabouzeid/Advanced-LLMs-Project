@@ -39,18 +39,14 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
         responses.extend([
             ("OrderSelection", dict(order_id=order.id, explanation="Scripted order")),
             ("FleetSelection", dict(robot_id=robot_id, explanation="Fresh scripted Fleet decision")),
-            ("RouteIntent", dict(order_id=order.id, robot_id=robot_id,
-                                 route_type="continuation" if index and robot_id == "robot-1" else "delivery",
-                                 explanation="Scripted routing intent")),
             ("SafetyDecision", dict(approved=True, conflicts=[], explanation="Scripted approval")),
         ])
     initial_responses = list(responses)
     groups = [("robot-1", [0, 1])] if second_robot == "robot-1" else [("robot-1", [0]), ("robot-3", [1])]
     for robot_id, indices in groups:
         for index in indices:
-            responses.extend(initial_responses[index * 4 + 2:index * 4 + 4])
+            responses.extend(initial_responses[index * 3 + 2:index * 3 + 3])
         responses.extend([
-            ("RouteIntent", dict(robot_id=robot_id, order_id=None, route_type="parking", explanation="Scripted parking intent")),
             ("SafetyDecision", dict(approved=True, conflicts=[], explanation="Scripted parking approval")),
         ])
     requests = []

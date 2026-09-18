@@ -46,6 +46,19 @@ def _robot(warehouse: WarehouseState, robot_id: Identifier) -> Robot:
     raise KeyError("Unknown robot identifier")
 
 
+def routing_path(warehouse, robot_id, start, target, avoid_cells=()):
+    """Use identical A* constraints for Fleet costs and Route geometry.
+
+    Other robots occupy their supplied snapshot positions. Only trusted callers
+    may add avoid cells; model text never supplies paths or routing constraints.
+    """
+    if any(not warehouse.contains(cell) for cell in avoid_cells):
+        raise ValueError("Avoid cells must be inside the grid")
+    blocked = warehouse.blocked_cells | set(avoid_cells) | {
+        robot.position for robot in warehouse.robots if robot.id != robot_id}
+    return astar_path(warehouse.width, warehouse.height, start, target, warehouse.obstacles, blocked)
+
+
 class FleetTools:
     """Compute trusted Fleet costs without supplying routes to the Route agent."""
     def robot_records(self, warehouse: WarehouseState) -> tuple[Robot, ...]:
@@ -73,11 +86,8 @@ class FleetTools:
                 # robot advances along its active chain. Other forecast tails
                 # are not simultaneous occupancy (several may share a drop-off).
                 # Finalization resolves physical schedule occupancy separately.
-                blocked = warehouse.blocked_cells | {r.position for r in warehouse.robots if r.id != robot.id}
-                pickup = astar_path(warehouse.width, warehouse.height, robot.position,
-                                    order.package.pickup, warehouse.obstacles, blocked)
-                delivery = astar_path(warehouse.width, warehouse.height, order.package.pickup,
-                                      order.dropoff, warehouse.obstacles, blocked)
+                pickup = routing_path(warehouse, robot.id, robot.position, order.package.pickup)
+                delivery = routing_path(warehouse, robot.id, order.package.pickup, order.dropoff)
                 pickup_cost = len(pickup) - 1 if pickup is not None else None
                 delivery_cost = len(delivery) - 1 if delivery is not None else None
                 if pickup_cost is None or delivery_cost is None:
@@ -92,20 +102,13 @@ class FleetTools:
 
 
 class RouteTools:
-    """Provide trusted endpoints and deterministic A* paths after LLM intent."""
-
-    def _path(self, warehouse, robot_id, start, target, avoid_cells):
-        if any(not warehouse.contains(cell) for cell in avoid_cells):
-            raise ValueError("Avoid cells must be inside the grid")
-        blocked = warehouse.blocked_cells | set(avoid_cells) | {
-            robot.position for robot in warehouse.robots if robot.id != robot_id}
-        return astar_path(warehouse.width, warehouse.height, start, target, warehouse.obstacles, blocked)
+    """Generate exact shortest paths for trusted assignments with deterministic A*."""
 
     def plan_delivery(self, warehouse, order_id, robot_id, avoid_cells=()):
         """Generate shortest endpoint-inclusive legs without executing movement."""
         order, robot = _order(warehouse, order_id), _robot(warehouse, robot_id)
-        pickup = self._path(warehouse, robot_id, robot.position, order.package.pickup, avoid_cells)
-        delivery = self._path(warehouse, robot_id, order.package.pickup, order.dropoff, avoid_cells)
+        pickup = routing_path(warehouse, robot_id, robot.position, order.package.pickup, avoid_cells)
+        delivery = routing_path(warehouse, robot_id, order.package.pickup, order.dropoff, avoid_cells)
         if pickup is None or delivery is None:
             return None
         return DeliveryPlan(robot_id=robot_id, order_id=order_id, pickup_route=pickup,
@@ -114,16 +117,9 @@ class RouteTools:
 
     def plan_parking(self, warehouse, robot_id, target, avoid_cells=()):
         """Generate shortest final departure to the trusted reserved target."""
-        path = self._path(warehouse, robot_id, _robot(warehouse, robot_id).position, target, avoid_cells)
+        path = routing_path(warehouse, robot_id, _robot(warehouse, robot_id).position, target, avoid_cells)
         return None if path is None else MovementPlan(robot_id=robot_id, route=path, warehouse_revision=warehouse.revision)
 
-    def grid_context(self, warehouse: WarehouseState, order_id: Identifier, robot_id: Identifier) -> dict:
-        """Describe the selected robot, pickup, drop-off and occupied cells for LLM routing."""
-        return {"warehouse": warehouse.model_dump(mode="json"),
-                "selected_order": _order(warehouse, order_id).model_dump(mode="json"),
-                "selected_robot": _robot(warehouse, robot_id).model_dump(mode="json"),
-                "other_occupied_cells": [robot.position.model_dump() for robot in warehouse.robots
-                                         if robot.id != robot_id]}
 
 
 class SafetyTools:

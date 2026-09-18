@@ -68,7 +68,10 @@ def test_normal_plan_all_updates_leave_warehouse_unchanged(initial):
 
 
 def test_route_unreachable_stops_once(initial):
-    result = run(initial, model=client(scripts={"RouteIntent": [dict(robot_id="robot-1", order_id="o", route_type="delivery", avoid_cells=[dict(x=2,y=0)], retry_feedback_acknowledged=True, explanation="Avoid pickup per context")] }))
+    class Unreachable(RouteTools):
+        def plan_delivery(self, *args):
+            return None
+    result = run(initial, route_tools=Unreachable())
     assert result.run_outcome == "unreachable"
     assert result.planned_deliveries[0].status == "unplannable"
     assert result.warehouse == initial.warehouse
@@ -92,13 +95,13 @@ def test_retry_failure_consumes_attempt(initial, failure):
     state = merge(changed(run(initial)), {"command": "execute"})
     class Tool(RouteTools):
         calls = 0
-        def grid_context(self, *args):
+        def plan_delivery(self, *args):
             self.calls += 1
             if failure:
                 raise RuntimeError("private")
-            return super().grid_context(*args)
+            return None
     tool = Tool()
-    result = run(state, route_tools=tool, model=client(scripts={"RouteIntent": [dict(robot_id="robot-1", order_id="o", route_type="delivery", avoid_cells=[dict(x=2,y=0)], retry_feedback_acknowledged=True, explanation="Avoid pickup per context")]}))
+    result = run(state, route_tools=tool)
     assert result.run_outcome == ("failed" if failure else "unreachable")
     assert result.replan_count == 1 and tool.calls == 1
     assert result.warehouse == state.warehouse and result.safety is None
@@ -165,8 +168,8 @@ def test_malformed_geometry_cannot_be_overridden(initial):
     state = merge(proposal, {"command": "execute", "planned_deliveries": records})
     graph = workflow.build_graph(client=client(scripts={"SafetyDecision": [{"approved": True, "conflicts": [], "explanation": "Everything is safe"}]}))
     result = WarehouseGraphState.model_validate(graph.invoke(state))
-    assert result.run_outcome == "ready" and not result.execution_requested
-    assert result.replan_count == 1 and result.warehouse == state.warehouse
+    assert result.run_outcome == "failed" and not result.execution_requested
+    assert result.replan_count == 0 and result.warehouse == state.warehouse
     assert any(a.node == "safety" and a.status == "rejected" for a in result.node_activity)
 
 
@@ -258,7 +261,7 @@ def test_unchecked_execute_must_run_safety_before_execution(initial):
 @pytest.mark.parametrize("error", [RuntimeError("private"), TimeoutError("private")])
 def test_initial_route_failure_ends(initial, error):
     class Broken(RouteTools):
-        def grid_context(self, *args):
+        def plan_delivery(self, *args):
             raise error
     result = run(initial, route_tools=Broken())
     assert result.run_outcome == "failed" and result.replan_count == 0

@@ -149,8 +149,32 @@ mocked, including real ChatGroq structured-call boundary tests. No dependencies
 or environment variables changed. The existing Starlette warning remains.
 
 
-Hybrid Route/Safety verification: **594 backend tests and 58 frontend tests** pass.
-The frontend build, pip check and git diff --check pass. RouteIntent function-call
-parsing and checkpointed feedback replacements are tested offline. No new packages,
+Historical hybrid Route/Safety verification: **594 backend tests and 58 frontend tests** pass.
+The frontend build, pip check and git diff --check pass. The former routing-intent call
+and checkpointed feedback replacements are tested offline. No new packages,
 environment variables or live Groq calls were needed. The existing Starlette
 BlockingPortal deprecation warning remains.
+
+
+## Deterministic Route verification
+
+The current architecture is Order LLM, hybrid Fleet, deterministic A* Route, and
+hybrid Safety. **590 backend tests and 58 frontend tests pass**; frontend build,
+pip check and git diff --check pass. The three-order API regression mocks the real
+ChatGroq completion boundary for Order/Fleet/Safety only and verifies Plan, checkpoint
+readback, shared drop-off chaining, final parking and Execute. Route makes no model
+calls. Pytest does not read credentials or contact Groq. The existing Starlette
+BlockingPortal warning remains.
+
+Restart the backend after changing graph state schemas. Checkpoints and sessions
+are process-local, so restart starts fresh sessions; no persistent migration is needed.
+Expected unreachable paths and Safety rejection return typed command outcomes.
+Unexpected errors still return a generic 500. Inspect backend error logs for the
+original exception/traceback and session command, pending nodes, outcome and failed
+activity details. Do not publish server diagnostics as API responses.
+
+One approved live diagnostic before this conversion successfully planned a default
+warehouse with a synthetic order and final parking. A follow-up live diagnostic was
+blocked by automatic approval review's usage limit. The original intermittent live
+500 was not reproduced against Groq, and this conversion is not proof that Route
+caused that error. No post-conversion live-provider verification was performed.

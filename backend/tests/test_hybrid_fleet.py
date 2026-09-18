@@ -57,7 +57,11 @@ def test_shared_dropoff_has_no_preference_except_actual_cost(second_pickup, expe
     assert all(s.parking.status == "completed" for s in delivered.robot_schedules)
 
 
-def test_later_batch_costs_start_at_actual_parking_with_remaining_battery():
+@pytest.mark.parametrize("pickup, expected, costs", [
+    (p(1, 4), "robot-2", (11, 7, 18)),
+    (p(7, 8), "robot-1", (1, 11, 12)),
+])
+def test_later_batch_costs_start_at_actual_parking_with_remaining_battery(pickup, expected, costs):
     model = client()
     ready = run(initial(count=1), model)
     delivered = run(WarehouseGraphState.model_validate({**ready.model_dump(), "command": "execute"}), model)
@@ -65,15 +69,21 @@ def test_later_batch_costs_start_at_actual_parking_with_remaining_battery():
     parked = delivered.warehouse.robots[0]
     assert parked.position == p(7, 9) and parked.battery == 84
     simulation = WarehouseSimulation(delivered.warehouse)
-    simulation.create_order("later", "later-package", p(1, 4), p(4, 0))
+    simulation.create_order("later", "later-package", pickup, p(4, 0))
     later_model = client()
     later = run(WarehouseGraphState(warehouse=simulation.state, command="plan"), later_model)
     payload, = fleet_payloads(later_model)
     candidate = payload["candidates"][0]
     assert candidate["robot"] == parked.model_dump(mode="json")
-    assert (candidate["pickup_cost"], candidate["delivery_cost"], candidate["total_cost"]) == (11, 7, 18)
+    assert (candidate["pickup_cost"], candidate["delivery_cost"], candidate["total_cost"]) == costs
     assert payload["robot_forecasts"][0]["order_ids"] == []
-    assert later.planned_deliveries[0].robot_id == "robot-2"
+    record = later.planned_deliveries[0]
+    assert record.robot_id == expected
+    selected = next(r for r in delivered.warehouse.robots if r.id == expected)
+    assert record.delivery_plan.pickup_route[0] == selected.position
+    if expected == "robot-1":
+        assert record.delivery_plan.pickup_route[0] == parked.position
+        assert record.delivery_plan.total_steps == costs[2]
 
 
 def test_astar_recalculates_both_legs_for_all_robots_for_each_order(monkeypatch):
@@ -82,7 +92,7 @@ def test_astar_recalculates_both_legs_for_all_robots_for_each_order(monkeypatch)
     import inspect
 
     def counted(*args):
-        if inspect.currentframe().f_back.f_code.co_name == "candidate_records":
+        if inspect.currentframe().f_back.f_back.f_code.co_name == "candidate_records":
             calls.append(args)
         return original(*args)
 
@@ -149,7 +159,7 @@ def test_costs_are_astar_detours_not_manhattan_estimates():
     candidate = fleet_payloads(model)[0]["candidates"][0]
     assert candidate["pickup_cost"] == 4  # Manhattan is 2; blocked cell requires detour.
     assert candidate["delivery_cost"] == 7 and candidate["total_cost"] == 11
-    assert "route" not in candidate  # Actual Route coordinates remain model-authored.
+    assert "route" not in candidate  # Only Route returns exact coordinates.
 
 
 @pytest.mark.parametrize("kwargs, outcome", [

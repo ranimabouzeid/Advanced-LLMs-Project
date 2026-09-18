@@ -1,4 +1,4 @@
-"""Mandatory model decisions, feedback retries, and unchanged execution guards."""
+"""Three shared-model roles, deterministic Route and unchanged execution guards."""
 
 import pytest
 
@@ -6,12 +6,6 @@ from app.graph.graph import build_graph
 from app.graph.state import WarehouseGraphState
 from llm_fakes import client
 from test_batch import initial, merge
-
-
-def route(detour=0):
-    return dict(robot_id="robot-1", order_id="o1", route_type="delivery",
-                avoid_cells=[{"x": 2, "y": 0}] if detour else [],
-                retry_feedback_acknowledged=True, explanation="Routing intent with corridor constraint")
 
 
 def decide(approved):
@@ -23,7 +17,7 @@ def invoke(state, model):
     return WarehouseGraphState.model_validate(build_graph(client=model).invoke(state))
 
 
-def test_all_four_use_shared_model_with_trusted_hybrid_tools(monkeypatch):
+def test_only_order_fleet_safety_use_shared_model_with_trusted_tools(monkeypatch):
     from app.graph import tools
     original_astar = tools.astar_path
     costs = []
@@ -40,54 +34,37 @@ def test_all_four_use_shared_model_with_trusted_hybrid_tools(monkeypatch):
     model = client(scripts={
         "OrderSelection": [dict(order_id="o1", explanation="Choose this order")],
         "FleetSelection": [dict(robot_id="robot-1", explanation="Choose this robot")],
-        "RouteIntent": [route(1), route(1)], "SafetyDecision": [decide(True)] * 3})
+        "SafetyDecision": [decide(True)] * 3})
     state = initial(count=1)
     result = invoke(state, model)
     assert result.run_outcome == "ready" and result.warehouse == state.warehouse
     assert [schema.__name__ for schema, _, _ in model.calls] == [
-        "OrderSelection", "FleetSelection", "RouteIntent", "SafetyDecision",
-        "RouteIntent", "SafetyDecision", "RouteIntent", "SafetyDecision"]
-    assert result.delivery_plan.total_steps == 6  # A* shortest route under the LLM corridor constraint.
+        "OrderSelection", "FleetSelection", "SafetyDecision", "SafetyDecision", "SafetyDecision"]
+    assert result.delivery_plan.total_steps == 4  # Exact shortest route, no model constraints.
     assert len(costs) == 11  # Fleet costs + preview/final delivery paths + parking.
 
 
 @pytest.mark.parametrize("budget", [0, 1, 2, 3])
-def test_safety_rejections_have_bounded_model_retries(budget):
-    model = client(scripts={"RouteIntent": [route(i) for i in range(budget + 1)],
-                            "SafetyDecision": [decide(False)] * (budget + 1)})
+def test_safety_rejection_does_not_retry_identical_deterministic_inputs(budget):
+    model = client(scripts={"SafetyDecision": [decide(False)]})
     state = merge(initial(count=1), {"max_replans": budget})
     result = invoke(state, model)
-    assert result.run_outcome == "failed" and result.replan_count == budget
+    assert result.run_outcome == "failed" and result.replan_count == 0
     assert result.warehouse == state.warehouse and not result.execution_requested
     assert result.planned_deliveries[0].status == "unplannable"
-    calls = [payload for schema, payload, _ in model.calls if schema.__name__ == "RouteIntent"]
-    assert len(calls) == budget + 1
-    for attempt, payload in enumerate(calls[1:], 1):
-        assert payload["replan_count"] == attempt
-        assert payload["safety_feedback"] == decide(False)
-        assert payload["previous_route"] is not None
+    assert [schema.__name__ for schema, _, _ in model.calls] == [
+        "OrderSelection", "FleetSelection", "SafetyDecision"]
+    assert sum(a.node == "route" for a in result.node_activity) == 1
 
 
-def test_unchanged_shortest_path_is_recomputed_and_rechecked_on_retry():
-    model = client(scripts={"SafetyDecision": [decide(False)]})
-    result = invoke(initial(count=1), model)
-    assert result.run_outcome == "ready" and result.replan_count == 1
-    routes = [payload for schema, payload, _ in model.calls if schema.__name__ == "RouteIntent"]
-    assert routes[1]["previous_route"] is not None and routes[1]["safety_feedback"] == decide(False)
-    assert sum(schema.__name__ == "SafetyDecision" for schema, _, _ in model.calls) == 4
-
-
-def test_execute_rejection_returns_replacement_then_requires_new_execute():
+def test_execute_rejection_without_changed_constraints_stops_and_revokes_approval():
     model = client(scripts={"SafetyDecision": [decide(True)] * 3 + [decide(False)]})
     ready = invoke(initial(count=1), model)
-    replacement = invoke(merge(ready, {"command": "execute"}), model)
-    assert replacement.run_outcome == "ready" and replacement.replan_count == 1
-    assert replacement.warehouse == ready.warehouse and not replacement.execution_requested
-    retried = [payload for schema, payload, _ in model.calls if schema.__name__ == "RouteIntent"
-               and payload.get("safety_feedback")]
-    assert retried and all(payload["safety_feedback"] == decide(False) for payload in retried)
-    assert replacement.route_retry_feedback == ()
-    assert invoke(replacement, model).run_outcome == "delivered"
+    rejected = invoke(merge(ready, {"command": "execute"}), model)
+    assert rejected.run_outcome == "failed" and rejected.replan_count == 0
+    assert rejected.warehouse == ready.warehouse and not rejected.execution_requested
+    assert all(item.status == "stale" and item.safety is None for item in rejected.planned_deliveries)
+    assert len(model.calls) == 6  # Only the extra Safety review; no new assignment or path.
 
 
 def test_stale_revision_cannot_be_approved_by_model():
@@ -104,7 +81,7 @@ def test_stale_revision_cannot_be_approved_by_model():
     assert result.delivery_plan.warehouse_revision == stale.warehouse_revision
 
 
-def test_hard_findings_flow_into_fresh_route_intent_and_astar_retry():
+def test_hard_findings_reject_corrupted_path_without_retrying_unchanged_inputs():
     from app.graph.tools import RouteTools
     from app.warehouse import DeliveryPlan
 
@@ -124,10 +101,8 @@ def test_hard_findings_flow_into_fresh_route_intent_and_astar_retry():
     model = client(scripts={"SafetyDecision": [decide(True)] * 4})
     state = initial(count=1)
     result = WarehouseGraphState.model_validate(build_graph(client=model, route_tools=tools).invoke(state))
-    assert result.run_outcome == "ready" and result.replan_count == 1
-    assert tools.calls == 3  # First proposal, feedback retry and finalization.
-    routes = [data for schema, data, _ in model.calls if schema.__name__ == "RouteIntent"]
-    assert any("non_adjacent" in text for text in routes[1]["safety_feedback"]["conflicts"])
-    assert routes[2]["safety_feedback"] == routes[1]["safety_feedback"]
-    assert result.delivery_plan.total_steps == 4 and result.warehouse == state.warehouse
-    assert result.route_retry_feedback == ()
+    assert result.run_outcome == "failed" and result.replan_count == 0
+    assert tools.calls == 1
+    assert not result.planned_deliveries[0].safety.approved
+    assert any("non_adjacent" in text for text in result.planned_deliveries[0].safety.conflicts)
+    assert result.warehouse == state.warehouse

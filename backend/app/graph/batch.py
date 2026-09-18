@@ -12,7 +12,7 @@ from app.warehouse import WarehouseSimulation
 from app.warehouse.models import DeliveryPlan, OrderStatus, WarehouseState
 from app.warehouse.simulation import DeliveryExecutionResult
 from .agents import order_agent, fleet_agent, route_agent, safety_agent
-from .state import NodeActivity, PlannedDelivery, RobotForecast, RouteRetryFeedback, WarehouseGraphState
+from .state import NodeActivity, PlannedDelivery, RobotForecast, WarehouseGraphState
 from .tools import FleetTools, OrderTools, RouteTools, SafetyTools
 from .updates import StateUpdate
 
@@ -28,7 +28,7 @@ def workspace(state: WarehouseGraphState, **overrides) -> WarehouseGraphState:
     fields = {name: getattr(state, name) for name in (
         "command", "execution_requested", "order_selection", "selected_robot_id",
         "delivery_plan", "planning_outcome", "safety", "replan_count", "max_replans",
-        "run_outcome", "error_message", "node_activity", "robot_forecasts", "route_retry_feedback")}
+        "run_outcome", "error_message", "node_activity", "robot_forecasts")}
     fields.update(overrides)
     warehouse = state.projected_warehouse or state.warehouse
     selected = fields.get("selected_robot_id")
@@ -55,7 +55,6 @@ def start_planning(state: WarehouseGraphState, *, replacement: bool = False) -> 
                 planning_outcome="not_planned", run_outcome="running", error_message=None,
                 robot_forecasts=tuple(RobotForecast(robot=r) for r in state.warehouse.robots),
                 robot_schedules=(),
-                route_retry_feedback=state.route_retry_feedback if replacement else (),
                 execution_requested=False, replan_count=state.replan_count + 1 if replacement else 0)
 
 
@@ -93,9 +92,9 @@ def fleet(state: WarehouseGraphState, *, client: BaseChatModel,
     return {**update, "replan_count": state.replan_count}
 
 
-def route(state: WarehouseGraphState, *, client: BaseChatModel, tools: RouteTools | None = None) -> StateUpdate:
-    """Generate an LLM delivery preview on the selected robot timeline, preserving batch retries."""
-    return {**route_agent(workspace(state), client=client, tools=tools), "replan_count": state.replan_count}
+def route(state: WarehouseGraphState, *, tools: RouteTools | None = None) -> StateUpdate:
+    """Generate deterministic delivery paths from the same selected forecast used by Fleet."""
+    return {**route_agent(workspace(state), tools=tools), "replan_count": state.replan_count}
 
 
 def project(warehouse: WarehouseState, plan: DeliveryPlan) -> WarehouseState:
@@ -127,19 +126,6 @@ def safety(state: WarehouseGraphState, *, client: BaseChatModel,
                 error_message="Safety requires a finalized unconsumed robot schedule",
                 node_activity=(*state.node_activity, NodeActivity(node="safety", status="failed",
                     message="Safety requires a finalized unconsumed robot schedule")))
-
-
-def retry_route(state: WarehouseGraphState, *, client: BaseChatModel,
-                tools: RouteTools | None = None) -> StateUpdate:
-    """Consume one retry and request new LLM coordinates using the rejected route and feedback."""
-    if state.safety is None or state.safety.approved or state.replan_count >= state.max_replans:
-        return failure(state)
-    local = WarehouseGraphState.model_validate({**state.model_dump(),
-        "replan_count": state.replan_count + 1, "execution_requested": False,
-        "route_retry_feedback": (*state.route_retry_feedback, RouteRetryFeedback(
-            robot_id=state.selected_robot_id, order_id=state.order_selection.order_id,
-            previous_route=state.delivery_plan, safety=state.safety))})
-    return {**route(local, client=client, tools=tools), "route_retry_feedback": local.route_retry_feedback}
 
 
 def collect(state: WarehouseGraphState) -> StateUpdate:
@@ -186,7 +172,6 @@ def finish(state: WarehouseGraphState) -> StateUpdate:
     if outcome == "running":
         outcome = "no_work"
     return dict(projected_warehouse=None, planning_queue=(), planning_index=0,
-                route_retry_feedback=(),
                 robot_forecasts=(),
                 order_selection=approved.selection if approved else None,
                 selected_robot_id=approved.robot_id if approved else None,
@@ -205,7 +190,6 @@ def replan(state: WarehouseGraphState) -> StateUpdate:
 def failure(state: WarehouseGraphState) -> StateUpdate:
     """Stop the command, clear planning scratch state and intent, and retain committed warehouse data."""
     return dict(run_outcome="failed", execution_requested=False,
-                route_retry_feedback=(),
                 robot_forecasts=(),
                 projected_warehouse=None, planning_queue=(), planning_index=0,
                 error_message="Replan limit exhausted" if (state.planning_outcome == "stale"
