@@ -675,7 +675,7 @@ Fleet and Safety share one injected ChatGroq client through create_model_client,
 SessionCoordinator and build_graph, using function_calling with Pydantic results.
 Route remains a specialized LangGraph node and makes zero model calls.
 
-### Hybrid Fleet: trusted costs and constrained Groq selection
+### Hybrid Fleet: deterministic assignment and Groq explanation
 
 Every order triggers fresh candidate evaluation for every robot. For each idle,
 empty robot, FleetTools runs the existing deterministic A* twice: projected robot
@@ -696,14 +696,29 @@ After a completed batch, the next Plan initializes forecasts from committed park
 positions and remaining batteries, including the previous parking movement cost.
 There is no parking between orders in the same chain.
 
-The shared Groq client still returns FleetSelection. It receives exact candidate
-costs and the minimum feasible cost/IDs, and must not estimate distances. Any tied
-minimum may be selected. Null is accepted only if no feasible candidate exists.
-Unknown, unavailable, battery-infeasible, non-minimum and unjustified null choices
-receive one corrective retry with the same candidate table and explicit feedback.
-A second invalid choice fails the command; no robot is silently substituted.
-Provider or malformed-schema failures terminate without this semantic retry.
-The two-call Fleet bound is local and separate from the warehouse-change replacement budget.
+Code validates the candidate records and selects the minimum feasible tuple
+(total_cost, robot.id), using lexical robot-ID ordering for reproducible ties.
+Candidate coverage must include every projected robot exactly once, with matching
+robot data and consistent leg totals. There is no previous-robot preference and no
+cached winner. Invalid candidate data produces a controlled failed Fleet result.
+
+Only after selection does the shared Groq client receive the current order, all
+candidate costs, projected robots, workload, selected_robot_id, tie-break rule and
+trusted assignment summary. It returns FleetExplanation, containing only a bounded
+explanation string. The prompt asks it to explain the predetermined result; it has
+no assignment or veto authority. Code creates FleetSelection with the authoritative
+robot ID and the trusted summary plus commentary. This transient result is published
+through the existing selected_robot_id and node_activity channels; no new checkpoint
+fields or serializer registration are required.
+
+An attempted robot_id override is rejected by the explanation schema, without
+rejecting the deterministic assignment. Malformed or unavailable commentary is logged
+and replaced by the trusted cost summary with an explicit "Groq explanation unavailable"
+notice. Provider details are not published. Fleet still attempts one structured Groq
+call per order, including no-feasible-robot outcomes; there is no selection retry.
+This fixes the reproduced live failure where Groq repeatedly chose a more expensive
+robot and the former minimum-cost validator aborted Plan. The assignment itself is
+never a fallback or an arbitrary substitution: it is fixed before the model call.
 
 When no eligible route is reachable, Fleet reports unreachable before Route is
 called; unavailable or battery-infeasible resources report no_robot. Order and
@@ -767,9 +782,9 @@ cell cannot be blocked by a warehouse mutation.
 
 ### Two planning stages
 
-1. **Assignment previews:** Order selects remaining work; Fleet makes a fresh LLM
-   decision constrained to minimum-cost feasible candidates, using every robot's
-   projected position, battery, workload and availability.
+1. **Assignment previews:** Order selects remaining work; Fleet deterministically
+   selects the minimum-cost feasible robot with robot-ID tie breaking using every
+   robot's projected state, then asks Groq to explain that assignment.
    Route and Safety produce and assess that assignment's preview. RobotForecast
    advances only the chosen robot's timeline, subtracting delivery steps and
    temporarily ending at its drop-off. No parking cost is assumed yet. These
@@ -796,7 +811,8 @@ cell are scheduled for parking recovery before new delivery groups.
 | Model | Meaning |
 | --- | --- |
 | OrderSelection | One eligible pending order and selection reason |
-| FleetSelection | Groq choice among feasible minimum-A*cost robots, or null when none is feasible |
+| FleetSelection | Code-owned minimum-A*cost assignment with robot-ID tie breaking, or null when none is feasible |
+| FleetExplanation | Groq commentary about the supplied deterministic assignment; no robot_id field or assignment authority |
 | LLMRoutePlan | Retained coordinate-result schema; actual plans use DeliveryPlan, never Groq coordinates |
 | LLMMovementPlan | Retained coordinate-result schema; actual parking uses MovementPlan |
 | SafetyDecision | LLM interpretation of trusted findings; hard failures force rejection |
@@ -807,7 +823,7 @@ cell are scheduled for parking recovery before new delivery groups.
 
 Model docstrings explain the whole result; Field descriptions define individual
 values; prompts specify role behavior. Pydantic enforces format and references;
-Fleet additionally enforces its trusted minimum-cost selection rule. JSON Schema and Groq-compatible
+Fleet deterministically applies its trusted minimum-cost and robot-ID ordering rule. JSON Schema and Groq-compatible
 tool conversion tests verify exported descriptions. Safety context identifies
 assignment previews, finalization or Execute review and the next departure type.
 A delivery approval does not implicitly approve a subsequent pickup or parking leg.
@@ -833,8 +849,10 @@ unreachable outcome; other assignments may still proceed. Unreachable final
 parking, unavailable staging or a finalization Safety rejection prevents READY and
 clears all incomplete schedules. Expected rejections use rejected/completed activity,
 not failed activity, so the API returns the typed workflow outcome with HTTP 200.
-Unexpected planner/provider/schema failures retain failed activity and produce a
-generic HTTP 500 while preserving the prior committed checkpoint. Server-side
+Caught agent errors retain failed activity and return a controlled terminal workflow
+rejection. The session commits that validated diagnostic state without executing
+movement. Uncaught Python exceptions or unfinished/invalid checkpoints produce a
+generic HTTP 500 and preserve the prior committed checkpoint. Server-side
 exception logs retain the traceback; checkpoint-rejection logs include command,
 next nodes, outcome and activity records. API responses contain no traceback.
 
@@ -853,7 +871,7 @@ last valid position, and stops dependent work; it never rolls back the delivered
 package. The result exposes partial/failed and parking failed/not_executed statuses.
 A fresh Plan can create parking-only recovery even when no pending orders remain.
 Until recovery succeeds a failed robot may still occupy the service cell; it is
-not treated as successfully parked. Unexpected infrastructure/checkpoint failures
+not treated as successfully parked. Uncaught infrastructure/checkpoint failures
 retain the previous committed checkpoint for the whole command. There are no
 external robot side effects.
 
@@ -879,12 +897,14 @@ scheduler. Reservation uses the first free designated site; it does not search a
 allocation permutations or relocate idle robots from unrelated occupied cells.
 An unreachable/energy-infeasible parking route causes planning to fail safely.
 Forecast delivery costs may change during finalization; all final costs, including
-parking, must fit remaining battery. LLM decisions can be wrong or suboptimal.
-Without Fleet corrective retries, planning makes three calls per assignment preview, one
+parking, must fit remaining battery. Order/Safety judgments and advisory Groq prose
+can be inaccurate; Fleet assignment is always determined from trusted costs.
+Planning attempts three model calls per assignment preview, one
 per finalized delivery and one per parking movement; Execute adds one Safety call
 per delivery/movement. This increases live latency. No charging, concurrent motion,
 time-expanded routing or persistent storage is implemented. Sessions are lost on
 restart. The removed scratch schemas require a backend restart; there are no persisted
 checkpoints to migrate. All pytest calls are offline. A separately approved live
-diagnostic before this Route conversion reached READY; it did not establish the
-cause of the reported intermittent live 500.
+diagnostic before the Route conversion reached READY. A subsequent user-supplied
+live log identified Fleet model disagreement as the controlled Plan rejection fixed
+by deterministic assignment authority. Other operational failures remain possible.

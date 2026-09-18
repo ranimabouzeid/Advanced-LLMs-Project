@@ -38,7 +38,7 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
         order = orders[index]
         responses.extend([
             ("OrderSelection", dict(order_id=order.id, explanation="Scripted order")),
-            ("FleetSelection", dict(robot_id=robot_id, explanation="Fresh scripted Fleet decision")),
+            ("FleetExplanation", dict(explanation=f"Explain deterministic assignment {robot_id}")),
             ("SafetyDecision", dict(approved=True, conflicts=[], explanation="Scripted approval")),
         ])
     initial_responses = list(responses)
@@ -82,7 +82,7 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
         result = WarehouseGraphState.model_validate(build_graph(client=model).invoke(state))
 
     fleet_requests = [request for request in requests
-                      if request["tool_choice"]["function"]["name"] == "FleetSelection"]
+                      if request["tool_choice"]["function"]["name"] == "FleetExplanation"]
     assert len(requests) == len(responses) and len(fleet_requests) == len(fleet_states) == 2
     payloads = [json.loads(request["messages"][-1]["content"]) for request in fleet_requests]
     for index, (current, payload) in enumerate(zip(fleet_states, payloads)):
@@ -100,7 +100,7 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
         assert current.selected_robot_id is current.delivery_plan is current.safety is None
         assert current.planning_outcome == "not_planned" and current.run_outcome == "running"
         assert current.error_message is None and not current.execution_requested
-        assert "selected_robot_id" not in payload
+        assert payload["selected_robot_id"] == ("robot-1" if index == 0 else second_robot)
     before = {robot["id"]: robot for robot in payloads[0]["robots"]}
     assert [c["total_cost"] for c in payloads[0]["candidates"]] == [4, 8, 12]
     assert [c["total_cost"] for c in payloads[1]["candidates"]] == (

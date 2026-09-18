@@ -33,13 +33,13 @@ def test_only_order_fleet_safety_use_shared_model_with_trusted_tools(monkeypatch
         monkeypatch.setattr(target, forbidden)
     model = client(scripts={
         "OrderSelection": [dict(order_id="o1", explanation="Choose this order")],
-        "FleetSelection": [dict(robot_id="robot-1", explanation="Choose this robot")],
+        "FleetExplanation": [dict(explanation="Explain the deterministic winner")],
         "SafetyDecision": [decide(True)] * 3})
     state = initial(count=1)
     result = invoke(state, model)
     assert result.run_outcome == "ready" and result.warehouse == state.warehouse
     assert [schema.__name__ for schema, _, _ in model.calls] == [
-        "OrderSelection", "FleetSelection", "SafetyDecision", "SafetyDecision", "SafetyDecision"]
+        "OrderSelection", "FleetExplanation", "SafetyDecision", "SafetyDecision", "SafetyDecision"]
     assert result.delivery_plan.total_steps == 4  # Exact shortest route, no model constraints.
     assert len(costs) == 11  # Fleet costs + preview/final delivery paths + parking.
 
@@ -53,7 +53,7 @@ def test_safety_rejection_does_not_retry_identical_deterministic_inputs(budget):
     assert result.warehouse == state.warehouse and not result.execution_requested
     assert result.planned_deliveries[0].status == "unplannable"
     assert [schema.__name__ for schema, _, _ in model.calls] == [
-        "OrderSelection", "FleetSelection", "SafetyDecision"]
+        "OrderSelection", "FleetExplanation", "SafetyDecision"]
     assert sum(a.node == "route" for a in result.node_activity) == 1
 
 

@@ -155,15 +155,15 @@ def test_failed_intermediate_hidden_and_next_command_uses_commit(coordinator, mo
     assert len(coordinator.get_state(sid).node_activity) == 8
 
 
-def test_model_failure_does_not_commit(coordinator):
+def test_controlled_model_failure_commits_diagnostics_without_movement(coordinator):
     sid = prepared(coordinator)
     before = coordinator.get_state(sid)
     coordinator._graph = build_graph(
         client=client({"order_id": "invented", "explanation": "Invalid"}),
         checkpointer=coordinator._saver)
-    with pytest.raises(SessionExecutionError):
-        coordinator.plan(sid)
-    assert coordinator.get_state(sid) == before
+    result = coordinator.plan(sid)
+    assert result.run_outcome == "failed" and result.warehouse == before.warehouse
+    assert coordinator.get_state(sid) == result and not result.execution_requested
 
 
 @pytest.mark.parametrize("stage", ["write_before", "write_after", "read", "invalid_read"])
@@ -346,7 +346,7 @@ def test_creation_failure_does_not_register_session(coordinator, monkeypatch):
     assert coordinator._registry == {}
 
 
-def test_model_exception_keeps_commit_and_releases_guard(coordinator, monkeypatch):
+def test_caught_model_exception_keeps_warehouse_and_releases_guard(coordinator, monkeypatch):
     sid = prepared(coordinator)
     before = coordinator.get_state(sid)
 
@@ -355,7 +355,7 @@ def test_model_exception_keeps_commit_and_releases_guard(coordinator, monkeypatc
 
     with monkeypatch.context() as patch:
         patch.setattr("test_graph_workflow.Fake.with_structured_output", fail)
-        with pytest.raises(SessionExecutionError):
-            coordinator.plan(sid)
-    assert coordinator.get_state(sid) == before
+        result = coordinator.plan(sid)
+        assert result.run_outcome == "failed" and result.warehouse == before.warehouse
+    assert coordinator.get_state(sid) == result
     assert coordinator.plan(sid).run_outcome == "ready"

@@ -32,10 +32,20 @@ class OrderSelection(WorkflowModel):
 
 
 class FleetSelection(WorkflowModel):
-    """A fresh Fleet LLM choice among feasible candidates with minimum total A* cost."""
+    """Authoritative assignment selected by deterministic A* costs from projected state."""
 
-    robot_id: Identifier | None = Field(description="ID of a supplied feasible minimum-total-cost robot; null only if none is feasible. Use exact A* costs, never estimated distances. Previous assignments create no preference.")
-    explanation: ShortText = Field(description="Why this robot has minimum supplied A* total cost given its actual projected position, battery, workload and availability; explain any choice among tied minima.")
+    robot_id: Identifier | None = Field(description="Set by code to the feasible minimum-total-A*-cost robot, breaking ties by robot ID; null only if none is feasible. Groq cannot override this value. Previous assignments create no preference.")
+    explanation: ShortText = Field(description="Trusted assignment summary with optional Groq commentary about current projected position, battery and workload; commentary never controls the robot assignment.")
+
+
+class FleetExplanation(WorkflowModel):
+    """Groq commentary on an already selected deterministic Fleet assignment.
+
+    The A* optimizer owns selection from current projected state and robot-ID
+    tie breaking. This result cannot select, replace or veto that robot.
+    """
+
+    explanation: ShortText = Field(description="Explain the supplied deterministic selected_robot_id using exact candidate costs, projected positions, battery and workload. Explain robot-ID ordering for ties or infeasibility when null. Do not choose or recommend a different robot.")
 
 
 class LLMRoutePlan(WorkflowModel):

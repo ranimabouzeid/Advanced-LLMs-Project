@@ -156,7 +156,7 @@ environment variables or live Groq calls were needed. The existing Starlette
 BlockingPortal deprecation warning remains.
 
 
-## Deterministic Route verification
+## Historical deterministic Route verification
 
 The current architecture is Order LLM, hybrid Fleet, deterministic A* Route, and
 hybrid Safety. **590 backend tests and 58 frontend tests pass**; frontend build,
@@ -178,3 +178,27 @@ warehouse with a synthetic order and final parking. A follow-up live diagnostic 
 blocked by automatic approval review's usage limit. The original intermittent live
 500 was not reproduced against Groq, and this conversion is not proof that Route
 caused that error. No post-conversion live-provider verification was performed.
+
+
+## Fleet assignment authority
+
+Fleet now computes each assignment deterministically from fresh projected A* costs,
+with lexical robot-ID tie breaking, before requesting Groq FleetExplanation.
+Malformed/disagreeing commentary or an explanation-provider failure is logged and
+cannot veto the assignment. No provider/model settings or dependencies changed.
+Order, deterministic Route, and hybrid Safety retain their current roles.
+
+The supplied live log showed the former Fleet minimum-cost validator rejecting a
+Groq choice, rather than an A* cost error. Offline regressions mock the real Groq
+completion/parser boundary: R2 remains assigned when a response tries R1, and a
+three-order API Plan/Execute succeeds despite an attempted override on its second
+order. No live Groq calls are required by pytest or were made for this change.
+
+The existing session implementation returns validated terminal workflow failures as
+controlled HTTP 200 results with diagnostics. Uncaught Python/checkpoint errors still
+return generic 500 responses and preserve the prior committed checkpoint. Four older
+tests were updated to match that existing behavior; sessions.py was left untouched.
+
+Verification: **608 backend tests and 58 frontend tests pass**, as do the frontend
+build, pip check and git diff --check. The existing Starlette deprecation warning
+remains. No new dependency or environment variable is required.

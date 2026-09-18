@@ -9,8 +9,8 @@ from pydantic import BaseModel, ValidationError
 
 from app.config import structured_output
 from app.warehouse.models import DeliveryPlan
-from .state import FleetSelection, OrderSelection, SafetyDecision, WarehouseGraphState
-from .tools import FleetTools, OrderTools, RouteTools, SafetyTools
+from .state import FleetExplanation, FleetSelection, OrderSelection, SafetyDecision, WarehouseGraphState
+from .tools import FleetCandidate, FleetTools, OrderTools, RouteTools, SafetyTools
 from .updates import StateUpdate, fleet_result, order_result, route_result, safety_result
 
 
@@ -62,9 +62,11 @@ def order_agent(state: WarehouseGraphState, *, client: BaseChatModel,
 
 def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
                 tools: FleetTools | None = None) -> StateUpdate:
-    """Use trusted A* candidate costs with Groq reasoning and minimum-cost validation.
+    """Select the minimum projected A* cost deterministically, then ask Groq to explain.
 
-    Reusing a robot is valid only as a new model choice; committed state is unchanged.
+    Every order evaluates all robots afresh; ties use lexical robot-ID ordering.
+    Groq commentary cannot change or veto the winner. Invalid/unavailable commentary
+    is logged and replaced with the trusted cost summary, never another assignment.
     """
     if state.order_selection is None:
         return fleet_result(state, outcome="failed", message="Fleet requires a selected order")
@@ -74,10 +76,31 @@ def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
         forecasts = {item.robot.id: item.robot for item in state.robot_forecasts}
         robots = tuple(forecasts.get(robot.id, robot) for robot in robots)
         order = tools.order_record(state.warehouse, state.order_selection.order_id)
-        candidates = tools.candidate_records(state.warehouse, order.id, robots)
+        if order.id != state.order_selection.order_id or order.status != "pending":
+            raise ValueError("Fleet requires a pending order")
+        candidates = tuple(FleetCandidate.model_validate(item.model_dump())
+                           for item in tools.candidate_records(state.warehouse, order.id, robots))
+        expected = {robot.id: robot for robot in robots}
+        if (len(robots) != len(state.warehouse.robots) or len(expected) != len(robots)
+                or set(expected) != {r.id for r in state.warehouse.robots}
+                or len(candidates) != len(robots)
+                or {c.robot.id for c in candidates} != set(expected)
+                or any(c.robot != expected[c.robot.id] for c in candidates)):
+            raise ValueError("Fleet candidates must describe every current projected robot exactly once")
         feasible = [candidate for candidate in candidates if candidate.feasible]
-        minimum = min((candidate.total_cost for candidate in feasible), default=None)
-        minimum_ids = {candidate.robot.id for candidate in feasible if candidate.total_cost == minimum}
+        winner = min(feasible, key=lambda candidate: (candidate.total_cost, candidate.robot.id), default=None)
+        robot_id = winner.robot.id if winner else None
+        minimum = winner.total_cost if winner else None
+        minimum_ids = sorted(c.robot.id for c in feasible if c.total_cost == minimum)
+        if winner:
+            outcome = "running"
+            summary = (f"A* selected {robot_id}: {winner.pickup_cost} pickup + {winner.delivery_cost} delivery "
+                       f"= {minimum} steps; ties use robot ID.")
+        else:
+            unreachable = any(c.reason == "Pickup or drop-off is unreachable" for c in candidates)
+            reachable = any(c.total_cost is not None for c in candidates)
+            outcome = "unreachable" if unreachable and not reachable else "no_robot"
+            summary = "No feasible robot: unavailable, unreachable or insufficient projected battery."
         payload = {"warehouse": {**state.warehouse.model_dump(mode="json"),
                                   "robots": [robot.model_dump(mode="json") for robot in robots]},
                    "committed_warehouse": state.warehouse.model_dump(mode="json"),
@@ -85,37 +108,32 @@ def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
                    "robots": [robot.model_dump(mode="json") for robot in robots],
                    "selected_order": order.model_dump(mode="json"),
                    "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
-                   "minimum_total_cost": minimum, "minimum_robot_ids": sorted(minimum_ids)}
-        # One corrective retry for an inadmissible choice; never silently substitute a robot.
-        for _ in range(2):
-            selection = _decide(client, FleetSelection,
-                "You select the robot only. Use the supplied exact A* candidate costs; do not estimate "
-                "route distance yourself. Select only a feasible robot whose total_cost equals "
-                "minimum_total_cost. You may choose any tied minimum. Return robot_id=null only when "
-                "no candidate is feasible. Make a fresh decision for every order. Previous assignments "
-                "and shared/previous drop-offs create no preference except through actual current "
-                "projected position and route cost. Projected position is the expected location before "
-                "this order: an active same-batch chain ends at its last drop-off; a completed batch "
-                "ends at actual parking with departure energy already deducted. Forecasts are independent "
-                "timelines, not simultaneous occupancy; trust the supplied costs. Consider the supplied "
-                "battery, workload and availability. Do not choose "
-                "orders, construct routes, approve safety or execute movement.", payload)
-            if selection.robot_id in minimum_ids:
-                return fleet_result(state, robot_id=selection.robot_id, outcome="running",
-                                    message=selection.explanation)
-            if selection.robot_id is None and not feasible:
-                unreachable = any(c.reason == "Pickup or drop-off is unreachable" for c in candidates)
-                reachable = any(c.total_cost is not None for c in candidates)
-                outcome = "unreachable" if unreachable and not reachable else "no_robot"
-                return fleet_result(state, outcome=outcome, message=selection.explanation)
-            payload["selection_feedback"] = {
-                "rejected_robot_id": selection.robot_id,
-                "reason": "Choose a feasible minimum-cost robot, or null only if no feasible candidate exists.",
-            }
-        return fleet_result(state, outcome="failed", message="Fleet selection rejected: expected a feasible minimum-cost robot")
+                   "minimum_total_cost": minimum, "minimum_robot_ids": minimum_ids,
+                   "selected_robot_id": robot_id, "assignment_summary": summary,
+                   "tie_break": "lexicographic robot ID"}
     except Exception:
-        logger.exception("Fleet agent failed")
-        return fleet_result(state, outcome="failed", message="Fleet model or structured input/output failed")
+        logger.exception("Fleet candidate evaluation failed")
+        return fleet_result(state, outcome="failed", message="Fleet candidate evaluation failed")
+
+    try:
+        commentary = _decide(client, FleetExplanation,
+            "The deterministic fleet optimizer has already selected selected_robot_id, or null if "
+            "no robot is feasible. Explain this assignment using the supplied candidate data. "
+            "You are not the assignment authority: do not select, replace, recommend another robot "
+            "or veto the assignment. Code minimizes complete A* pickup plus delivery cost and breaks "
+            "ties by lexicographic robot ID. Use exact costs and current projected position, battery "
+            "and workload. Each order is evaluated afresh. Previous assignments or shared drop-offs "
+            "create no preference. Same-batch chains start at their last drop-off; later batches "
+            "start at committed parking with departure energy deducted. Independent forecast tails "
+            "are not simultaneous occupancy. Return only an explanation, never robot_id. "
+            "Do not choose orders, generate paths, approve safety or execute movement.", payload)
+        explanation = (summary + " Groq: " + commentary.explanation)[:300]
+    except Exception:
+        logger.warning("Fleet explanation unavailable or invalid; deterministic assignment retained for robot=%r",
+                       robot_id, exc_info=True)
+        explanation = (summary + " Groq explanation unavailable.")[:300]
+    selection = FleetSelection(robot_id=robot_id, explanation=explanation)
+    return fleet_result(state, robot_id=selection.robot_id, outcome=outcome, message=selection.explanation)
 
 
 def route_agent(state: WarehouseGraphState, *, tools: RouteTools | None = None) -> StateUpdate:

@@ -3,12 +3,12 @@
 import pytest
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from app.graph.state import (OrderSelection, FleetSelection, LLMRoutePlan, SafetyDecision,
+from app.graph.state import (OrderSelection, FleetSelection, FleetExplanation, LLMRoutePlan, SafetyDecision,
                              RobotForecast, PlannedDelivery, LLMMovementPlan, PlannedParking, RobotSchedule)
 from app.warehouse.movement import MovementPlan
 
 
-@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, LLMRoutePlan, SafetyDecision,
+@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, FleetExplanation, LLMRoutePlan, SafetyDecision,
                                     RobotForecast, PlannedDelivery, LLMMovementPlan, PlannedParking,
                                     RobotSchedule, MovementPlan])
 def test_model_and_field_guidance_is_exported(model):
@@ -21,7 +21,7 @@ def test_model_and_field_guidance_is_exported(model):
         assert description.lower() not in (name, model.__name__.lower())
 
 
-@pytest.mark.parametrize("model", [OrderSelection, FleetSelection, SafetyDecision])
+@pytest.mark.parametrize("model", [OrderSelection, FleetExplanation, SafetyDecision])
 def test_groq_tool_schema_keeps_the_model_guidance(model):
     exported = model.model_json_schema()
     tool = convert_to_openai_tool(model)["function"]
@@ -54,11 +54,17 @@ def test_guidance_preserves_required_fields_and_strict_validation():
         LLMRoutePlan(robot_id="r", order_id="o", route_to_pickup=[], route_to_dropoff=[], explanation="Empty")
 
 
-def test_fleet_schema_requires_trusted_minimum_cost_without_previous_assignment_preference():
-    description = FleetSelection.model_json_schema()["properties"]["robot_id"]["description"]
-    assert "minimum-total-cost" in description
-    assert "exact A* costs" in description and "never estimated distances" in description
+def test_fleet_schemas_separate_authoritative_assignment_from_groq_explanation():
+    selection = FleetSelection.model_json_schema()
+    description = selection["properties"]["robot_id"]["description"]
+    assert "Set by code" in description and "Groq cannot override" in description
     assert "Previous assignments create no preference" in description
+    explanation = FleetExplanation.model_json_schema()
+    assert set(explanation["properties"]) == set(explanation["required"]) == {"explanation"}
+    assert "current projected state" in explanation["description"]
+    assert "Do not choose or recommend a different robot" in explanation["properties"]["explanation"]["description"]
+    with pytest.raises(ValueError):
+        FleetExplanation(robot_id="r2", explanation="Override")
 
 
 def test_hybrid_safety_schema_preserves_hard_facts():

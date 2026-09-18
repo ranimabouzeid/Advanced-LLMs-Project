@@ -12,8 +12,9 @@ Plan builds a sequential batch using projected robot positions and batteries;
 Execute revalidates deliveries and final parking. Drop-offs are temporary service
 cells: packages stay delivered while robots chain to their next pickup or park.
 Order, Fleet and Safety use one shared Groq client. Order selects orders; hybrid
-Fleet combines fresh exact A* candidate costs with a Groq selection and minimum-cost
-validation, including one corrective retry for invalid choices. Route remains a
+Fleet selects the minimum complete projected A* cost deterministically, breaking
+ties by robot ID. Groq supplies structured commentary and cannot override or veto
+the assignment; invalid/unavailable commentary retains the trusted cost summary. Route remains a
 LangGraph node and generates exact shortest paths using deterministic A*, with no
 Groq call. Hybrid Safety interprets trusted findings and enforces every hard failure.
 Deterministic simulation still guards actual execution.
@@ -39,9 +40,9 @@ The current architecture preserves fresh projected Fleet decisions, direct same-
 chaining, unique final parking, and checkpoint isolation. Identical routing inputs
 are not retried after Safety rejection; changed warehouse inputs permit bounded
 replacement planning followed by explicit Execute. Expected unreachable paths return
-typed outcomes, while unexpected failures retain server-side diagnostics and generic
-API errors. See the current workflow architecture for details and limitations.
+typed outcomes, while caught node failures return controlled workflow rejections. Uncaught
+exceptions retain server-side diagnostics, generic API errors and checkpoint rollback. See the current workflow architecture for details and limitations.
 
-Verification: **590 offline backend tests and 58 frontend tests pass**. The frontend
+Verification: **608 offline backend tests and 58 frontend tests pass**. The frontend
 build, pip check and git diff --check pass. The existing Starlette deprecation warning
 remains. Restart the backend after this schema change; sessions are process-local.

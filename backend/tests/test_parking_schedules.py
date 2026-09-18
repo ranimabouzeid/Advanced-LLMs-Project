@@ -27,7 +27,7 @@ def scenario(assignments=("robot-1", "robot-2")):
     sim = WarehouseSimulation(WarehouseState.model_validate({**base.model_dump(), "robots": robots}))
     for index, pickup in enumerate((p(4, 2), p(1, 4), p(4, 4))[:len(assignments)], 1):
         sim.create_order(f"o{index}", f"p{index}", pickup, p(9, 0))
-    model = client(scripts={"FleetSelection": [dict(robot_id=rid, explanation="Independent choice") for rid in assignments]})
+    model = client(scripts={"FleetExplanation": [dict(explanation=f"Explain deterministic assignment {rid}") for rid in assignments]})
     return WarehouseGraphState(warehouse=sim.state, command="plan"), model
 
 
@@ -67,7 +67,7 @@ def test_r1_r2_r1_assignments_chain_without_intermediate_parking():
     assert next_work.delivery_plan.pickup_route[0] == first.delivery_plan.delivery_route[-1] == p(9, 0)
     assert next_work.delivery_plan.warehouse_revision == first.delivery_plan.warehouse_revision + 1
     assert r1.parking.plan.warehouse_revision == next_work.delivery_plan.warehouse_revision + 1
-    fleet = [data for schema, data, _ in model.calls if schema.__name__ == "FleetSelection"]
+    fleet = [data for schema, data, _ in model.calls if schema.__name__ == "FleetExplanation"]
     assert len(fleet) == 3 and all(len(data["robots"]) == 3 for data in fleet)
     assert fleet[2]["robots"][0]["position"] == {"x": 9, "y": 0}
     assert fleet[2]["robots"][1]["position"] == {"x": 9, "y": 0}
@@ -238,7 +238,7 @@ def test_parking_safety_rejection_does_not_retry_unchanged_path(budget):
     state, model = scenario(("robot-1",))
     yes = dict(approved=True, conflicts=[], explanation="Approved")
     no = dict(approved=False, conflicts=["Revise departure"], explanation="Try another path")
-    model = client(scripts={"FleetSelection": [dict(robot_id="robot-1", explanation="Chosen")],
+    model = client(scripts={"FleetExplanation": [dict(explanation="Explain assignment")],
                             "SafetyDecision": [yes, yes] + [no] * (budget + 1)})
     state = WarehouseGraphState.model_validate({**state.model_dump(), "max_replans": budget})
     result = run(state, model)

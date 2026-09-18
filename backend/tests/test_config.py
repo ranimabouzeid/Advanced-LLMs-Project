@@ -133,7 +133,7 @@ def test_real_groq_structured_order_parsing_offline(monkeypatch, arguments, vali
 
 
 @pytest.mark.parametrize("schema_name, output", [
-    ("FleetSelection", {"robot_id": "r1", "explanation": "Chosen"}),
+    ("FleetExplanation", {"explanation": "The optimizer selected r1 by complete projected A* cost"}),
     ("SafetyDecision", {"approved": True, "conflicts": [], "explanation": "Approved"}),
 ])
 def test_real_groq_other_role_schemas_offline(monkeypatch, schema_name, output):

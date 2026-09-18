@@ -1,6 +1,6 @@
 """Trusted role context, Fleet costs, Route A* planning and hard Safety findings."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.warehouse.models import DeliveryPlan, Identifier, Order, OrderStatus, Robot, WarehouseState
 from app.warehouse.routing import astar_path
 from app.warehouse.validation import validate_delivery_plan
@@ -12,11 +12,26 @@ class FleetCandidate(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     robot: Robot = Field(description="Projected robot position, battery and availability before this assignment.")
-    pickup_cost: int | None = Field(ge=0, description="Exact A* steps from projected position to pickup; null when unavailable or unreachable.")
-    delivery_cost: int | None = Field(ge=0, description="Exact A* steps from pickup to drop-off; null when unavailable or unreachable.")
-    total_cost: int | None = Field(ge=0, description="Sum of both A* leg costs; null when either leg is unavailable.")
-    feasible: bool = Field(description="Both legs reachable, robot idle and empty, and projected battery covers their total cost.")
+    pickup_cost: int | None = Field(ge=0, strict=True, description="Exact A* steps from projected position to pickup; null when unavailable or unreachable.")
+    delivery_cost: int | None = Field(ge=0, strict=True, description="Exact A* steps from pickup to drop-off; null when unavailable or unreachable.")
+    total_cost: int | None = Field(ge=0, strict=True, description="Sum of both A* leg costs; null when either leg is unavailable.")
+    feasible: bool = Field(strict=True, description="Both legs reachable, robot idle and empty, and projected battery covers their total cost.")
     reason: str | None = Field(description="Reason the robot is infeasible, or null for a feasible candidate.")
+
+    @model_validator(mode="after")
+    def consistent_costs(self):
+        expected = (self.pickup_cost + self.delivery_cost
+                    if self.pickup_cost is not None and self.delivery_cost is not None else None)
+        if self.total_cost != expected:
+            raise ValueError("Fleet total must equal both reachable leg costs")
+        if self.feasible:
+            if (self.total_cost is None or self.robot.status != "idle"
+                    or self.robot.carried_package_id is not None
+                    or self.robot.battery < self.total_cost or self.reason is not None):
+                raise ValueError("Feasible Fleet candidate requires availability, reachable legs and battery")
+        elif not self.reason:
+            raise ValueError("Infeasible Fleet candidate requires a reason")
+        return self
 
 
 class OrderTools:

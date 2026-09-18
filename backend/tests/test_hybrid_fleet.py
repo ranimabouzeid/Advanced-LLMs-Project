@@ -1,4 +1,4 @@
-"""Exact Fleet costs, constrained model choices, and batch endpoint regressions."""
+"""Deterministic Fleet assignment authority, structured commentary and projected costs."""
 
 import pytest
 
@@ -22,7 +22,7 @@ def run(state, model):
 
 
 def fleet_payloads(model):
-    return [payload for schema, payload, _ in model.calls if schema.__name__ == "FleetSelection"]
+    return [payload for schema, payload, _ in model.calls if schema.__name__ == "FleetExplanation"]
 
 
 def choose(robot_id):
@@ -112,39 +112,29 @@ def test_astar_recalculates_both_legs_for_all_robots_for_each_order(monkeypatch)
     assert calls[18][2] == p(4, 0)  # Fourth decision starts R1 at its active chain tail.
 
 
-def test_nonminimum_choice_retries_with_exact_unchanged_costs():
-    model = client(choose("r3"), choose("r1"))
-    state = make_state()
-    update = fleet_agent(state, client=model)
-    assert update["run_outcome"] == "running" and update["selected_robot_id"] == "r1"
-    first, retry = fleet_payloads(model)
-    assert first["candidates"] == retry["candidates"]
-    assert "selection_feedback" not in first
-    assert retry["selection_feedback"]["rejected_robot_id"] == "r3"
-    assert retry["minimum_total_cost"] == 9 and retry["minimum_robot_ids"] == ["r1"]
-
-
-@pytest.mark.parametrize("bad_choice", ["r2", "missing", None])
-def test_repeated_invalid_choice_is_bounded_and_never_silently_replaced(bad_choice):
-    model = client(choose(bad_choice))
+def test_nonminimum_model_choice_is_discarded_without_reselection_or_retry():
+    model = client(choose("r3"))
     update = fleet_agent(make_state(), client=model)
-    assert len(fleet_payloads(model)) == 2
-    assert update["run_outcome"] == "failed" and update["selected_robot_id"] is None
-    assert "minimum-cost" in update["error_message"]
+    assert update["run_outcome"] == "running" and update["selected_robot_id"] == "r1"
+    payload, = fleet_payloads(model)
+    assert payload["selected_robot_id"] == "r1" and payload["minimum_total_cost"] == 9
+    assert "selection_feedback" not in payload
 
 
-@pytest.mark.parametrize("robot_id", ["r1", "r2"])
-def test_llm_may_choose_either_tied_minimum(robot_id):
-    state = make_state(positions=((1, 0), (0, 1), (0, 4)), pickup=(2, 2))
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("robot_id", ["r1", "r2", "missing", None])
+def test_ties_use_robot_id_regardless_of_model_output_or_record_order(robot_id, reverse):
+    state = make_state(positions=((1, 0), (0, 1), (0, 4)), pickup=(2, 2), reverse=reverse)
     model = client(choose(robot_id))
-    assert fleet_agent(state, client=model)["selected_robot_id"] == robot_id
+    assert fleet_agent(state, client=model)["selected_robot_id"] == "r1"
     payload, = fleet_payloads(model)
     assert payload["minimum_robot_ids"] == ["r1", "r2"]
+    assert payload["selected_robot_id"] == "r1" and len(model.calls) == 1
 
 
 def test_battery_infeasible_geometric_minimum_cannot_win():
     state = make_state(batteries=(8, 100, 100))
-    model = client(choose("r1"), choose("r2"))
+    model = client(choose("r1"))
     assert fleet_agent(state, client=model)["selected_robot_id"] == "r2"
     candidates = fleet_payloads(model)[0]["candidates"]
     assert candidates[0]["total_cost"] == 9 and not candidates[0]["feasible"]

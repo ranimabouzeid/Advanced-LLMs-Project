@@ -58,7 +58,7 @@ def test_every_order_evaluates_every_robot_again_on_projected_state():
     state, model = initial(), client()
     ready = WarehouseGraphState.model_validate(build_graph(client=model).invoke(state))
     assert ready.run_outcome == "ready" and ready.warehouse == state.warehouse
-    calls = [data for schema, data, _ in model.calls if schema.__name__ == "FleetSelection"]
+    calls = [data for schema, data, _ in model.calls if schema.__name__ == "FleetExplanation"]
     assert len(calls) == 4
     for index, data in enumerate(calls):
         assert data["selected_order"]["id"] == f"o{index+1}"
@@ -73,7 +73,7 @@ def test_every_order_evaluates_every_robot_again_on_projected_state():
 def test_low_projected_battery_is_supplied_and_final_parking_requires_energy():
     state, model = initial(battery=5), client()
     result = WarehouseGraphState.model_validate(build_graph(client=model).invoke(state))
-    calls = [data for schema, data, _ in model.calls if schema.__name__ == "FleetSelection"]
+    calls = [data for schema, data, _ in model.calls if schema.__name__ == "FleetExplanation"]
     assert calls[3]["robots"][0]["battery"] == 1
     # The mock does not reserve parking energy. Final Safety must stop this batch.
     assert result.run_outcome == "failed" and result.warehouse == state.warehouse
@@ -286,17 +286,18 @@ def test_batch_partial_result_is_visible_through_api(monkeypatch):
         assert http.get(f"/api/sessions/{sid}/state").json()["state"] == result["state"]
 
 
-def test_second_order_model_failure_discards_entire_uncommitted_plan():
+def test_second_order_model_failure_keeps_diagnostics_without_executable_schedule():
     coordinator = SessionCoordinator(client=client(scripts={"OrderSelection": [
         {"order_id": "o1", "explanation": "First"},
         {"order_id": "invented", "explanation": "Invalid"}]}))
     state = initial()
     sid = seed_session(coordinator, state)
     before = coordinator.get_state(sid)
-    with pytest.raises(SessionExecutionError):
-        coordinator.plan(sid)
-    assert coordinator.get_state(sid) == before
-    assert not coordinator.get_state(sid).planned_deliveries
+    result = coordinator.plan(sid)
+    assert result.run_outcome == "failed" and result.warehouse == before.warehouse
+    assert coordinator.get_state(sid) == result
+    assert not result.robot_schedules and not result.execution_requested
+    assert coordinator.execute(sid).warehouse == before.warehouse
 
 
 def test_invalid_later_route_rejects_batch_before_any_delivery():
