@@ -1,4 +1,4 @@
-"""Fleet decisions come from structured model output, never deterministic ranking."""
+"""Fleet model choices must satisfy trusted minimum A* costs."""
 import pytest
 from langchain_core.runnables import RunnableLambda
 from app.graph.agents import fleet_agent
@@ -23,7 +23,7 @@ def make_state(*, batteries=(100, 100, 100), statuses=("idle", "idle", "idle"),
 
 
 @pytest.mark.parametrize("robot_id", ["r1", "r2", "r3"])
-def test_model_chooses_any_available_robot_not_minimum_cost(robot_id, monkeypatch):
+def test_model_choice_must_be_minimum_cost(robot_id, monkeypatch):
     state = make_state()
     model = client({"robot_id": robot_id, "explanation": "My choice"})
     def forbidden(*args, **kwargs):
@@ -31,8 +31,9 @@ def test_model_chooses_any_available_robot_not_minimum_cost(robot_id, monkeypatc
     monkeypatch.setattr("app.warehouse.routing.plan_delivery", forbidden)
     before = state.model_dump_json()
     update = fleet_agent(state, client=model)
-    assert update["selected_robot_id"] == robot_id and update["run_outcome"] == "running"
-    assert model.calls[0][0] is FleetSelection and len(model.calls) == 1
+    assert update["selected_robot_id"] == (robot_id if robot_id == "r1" else None)
+    assert update["run_outcome"] == ("running" if robot_id == "r1" else "failed")
+    assert model.calls[0][0] is FleetSelection and len(model.calls) == (1 if robot_id == "r1" else 2)
     payload = model.calls[0][1]
     assert payload["robots"] == [r.model_dump(mode="json") for r in state.warehouse.robots]
     assert payload["selected_order"]["id"] == "o" and "warehouse" in payload
@@ -50,7 +51,7 @@ def test_unknown_or_unavailable_model_selection_fails(robot_id, status):
 
 def test_model_can_report_no_suitable_robot():
     model = client({"robot_id": None, "explanation": "Battery inadequate"})
-    update = fleet_agent(make_state(), client=model)
+    update = fleet_agent(make_state(batteries=(0, 0, 0)), client=model)
     assert update["run_outcome"] == "no_robot" and len(model.calls) == 1
 
 
@@ -72,11 +73,12 @@ def test_model_failure_does_not_leak_provider_error(error):
     assert update["run_outcome"] == "failed" and "private" not in update["error_message"]
 
 
-def test_fleet_tools_are_retrieval_only():
+def test_fleet_tools_retrieve_records_and_compute_costs():
     state = make_state()
     tools = FleetTools()
     assert tools.robot_records(state.warehouse) is state.warehouse.robots
     assert tools.order_record(state.warehouse, "o") is state.warehouse.orders[0]
-    assert not hasattr(tools, "evaluate_candidate")
+    candidates = tools.candidate_records(state.warehouse, "o", state.warehouse.robots)
+    assert [c.total_cost for c in candidates] == [9, 11, 13]
     with pytest.raises(KeyError):
         tools.order_record(state.warehouse, "missing")

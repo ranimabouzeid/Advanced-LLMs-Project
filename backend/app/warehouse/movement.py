@@ -8,16 +8,19 @@ from .validation import validate_route
 
 
 class MovementPlan(DomainModel):
-    robot_id: Identifier
-    route: tuple[Position, ...] = Field(min_length=1, max_length=201)
-    warehouse_revision: int = Field(ge=0, strict=True)
+    """Revision-bound empty-robot route to final parking/staging after delivery work."""
+    robot_id: Identifier = Field(description="Robot leaving its final drop-off for parking/staging.")
+    route: tuple[Position, ...] = Field(min_length=1, max_length=201, description="Endpoint-inclusive movement cells ending at reserved parking/staging, not a pickup or drop-off.")
+    warehouse_revision: int = Field(ge=0, strict=True, description="Expected input revision after this robot's final delivery, before parking movement.")
 
     @property
     def total_steps(self) -> int:
+        """Return the movement cost in battery points, excluding the starting cell."""
         return len(self.route) - 1
 
 
 class MovementResult(DomainModel):
+    """Atomic parking outcome; a rejected move exposes no partially moved snapshot."""
     success: bool
     final_state: WarehouseState | None = None
     error: str | None = None

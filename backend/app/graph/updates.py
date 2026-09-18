@@ -1,4 +1,4 @@
-"""Pure, validated partial updates for future sequential workflow nodes.
+"""Pure, validated partial updates for sequential workflow nodes.
 
 Each public helper owns a narrow set of outputs and explicit invalidations.
 No helper mutates state, runs an agent, or commits movement.
@@ -13,6 +13,7 @@ from .state import RobotForecast, RobotSchedule
 
 
 class StateUpdate(TypedDict, total=False):
+    """Only the shared-state fields explicitly owned or invalidated by one workflow step."""
     robot_forecasts: tuple[RobotForecast, ...]
     robot_schedules: tuple[RobotSchedule, ...]
     planned_deliveries: tuple[PlannedDelivery, ...]
@@ -34,6 +35,7 @@ class StateUpdate(TypedDict, total=False):
 
 
 def _validated(state: WarehouseGraphState, update: StateUpdate) -> StateUpdate:
+    """Validate the merged candidate and return only changed fields, including explicit clears."""
     # model_copy(update=...) bypasses validation. Validate the merged candidate,
     # then return only the explicitly owned/invalidated channels, including None.
     candidate = WarehouseGraphState.model_validate({**state.model_dump(exclude=set(update)), **update})
@@ -41,6 +43,7 @@ def _validated(state: WarehouseGraphState, update: StateUpdate) -> StateUpdate:
 
 
 def _clear_proposal() -> StateUpdate:
+    """Clear downstream approval and execution intent for a new role-local proposal."""
     return dict(delivery_plan=None, safety=None, planning_outcome="not_planned",
                 error_message=None, execution_requested=False, run_outcome="running",
                 replan_count=0)
@@ -129,6 +132,7 @@ def replace_warehouse(state: WarehouseGraphState, warehouse: WarehouseState) -> 
 
 
 def _plan_update(state: WarehouseGraphState, plan: DeliveryPlan, count: int) -> StateUpdate:
+    """Bind a route to the selected assignment and input revision, invalidating prior Safety approval."""
     plan = DeliveryPlan.model_validate(plan.model_dump())
     if (state.order_selection is None or plan.order_id != state.order_selection.order_id
             or plan.robot_id != state.selected_robot_id):
@@ -164,11 +168,7 @@ def route_result(state: WarehouseGraphState, *, plan: DeliveryPlan | None = None
 
 
 def replan(state: WarehouseGraphState, plan: DeliveryPlan) -> StateUpdate:
-    """Route publishes one retry, incrementing once without resetting its budget.
-
-    Choosing actionable feedback and handling unreachable attempts belongs to
-    future orchestration. This helper only publishes a supplied retry proposal.
-    """
+    """Replace a rejected proposal and increment the bounded retry count without executing movement."""
     if state.delivery_plan is None:
         raise ValueError("A retry requires an existing proposal")
     if state.replan_count >= state.max_replans:
@@ -187,6 +187,7 @@ def record_safety(state: WarehouseGraphState, result: SafetyDecision) -> StateUp
 
 def safety_result(state: WarehouseGraphState, *, result: SafetyDecision | None = None,
                   error: str | None = None) -> StateUpdate:
+    """Publish the current LLM assessment; rejection or failure revokes execution intent."""
     if result is None and error is None:
         raise ValueError("Safety requires a decision or an explicit failure")
     update = (record_safety(state, result) if result is not None else
@@ -210,7 +211,7 @@ def is_plan_approved(state: WarehouseGraphState) -> bool:
 
 
 def retry_result(state: WarehouseGraphState, result: StateUpdate) -> StateUpdate:
-    """Adapt a fresh Route result without losing a consumed retry attempt."""
+    """Apply a Route retry result while preserving its consumed retry attempt."""
     if state.delivery_plan is None or state.replan_count >= state.max_replans:
         raise ValueError("Retry requires a proposal and remaining budget")
     update = dict(result)
@@ -222,7 +223,7 @@ def retry_result(state: WarehouseGraphState, result: StateUpdate) -> StateUpdate
 
 
 def workflow_failure(state: WarehouseGraphState, message: str) -> StateUpdate:
-    """Terminate without changing domain state or retry accounting."""
+    """Record a terminal workflow failure without changing committed warehouse state."""
     return _validated(state, dict(run_outcome="failed", error_message=message,
                                  execution_requested=False))
 

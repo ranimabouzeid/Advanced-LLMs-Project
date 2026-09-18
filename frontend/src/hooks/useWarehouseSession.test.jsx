@@ -50,3 +50,20 @@ it('replacement notice persists on read but resets with session', async () => {
   await act(async () => { await result.current.run('reset'); });
   expect(result.current.replacementNotice).toBe(null); expect(result.current.lastCommand).toBe(null);
 });
+
+it('retains review notice for parking-only replacement until its schedule is consumed', async () => {
+  const { result } = renderHook(useWarehouseSession);
+  await waitFor(() => expect(result.current.pendingAction).toBe(null));
+  const parking = { ...initial, run_outcome: 'ready', execution_requested: false,
+    batch_revision: 3, robot_schedules: [{ parking: { status: 'approved', plan: { warehouse_revision: 3 } } }] };
+  fetch.mockResolvedValueOnce(response(envelope(parking, 'session-a', 'ready')));
+  await act(async () => { await result.current.run('execute'); });
+  expect(result.current.replacementNotice).toBe(3);
+  fetch.mockResolvedValueOnce(response(envelope(parking)));
+  await act(async () => { await result.current.run('refresh'); });
+  expect(result.current.replacementNotice).toBe(3);
+  const completed = { ...parking, robot_schedules: [{ parking: { status: 'completed', plan: { warehouse_revision: 3 } } }] };
+  fetch.mockResolvedValueOnce(response(envelope(completed)));
+  await act(async () => { await result.current.run('refresh'); });
+  expect(result.current.replacementNotice).toBe(null);
+});

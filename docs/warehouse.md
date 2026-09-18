@@ -2,8 +2,9 @@
 
 The current implementation includes domain data, sequential lifecycle actions,
 deterministic A*, complete two-leg delivery planning, typed validation, and atomic
-complete-delivery execution. Charging, LangGraph, LLM agents, HTTP, and UI remain
-outside the implemented scope.
+complete-delivery execution and atomic parking movement. This document covers the
+domain layer; the LLM graph, HTTP API and UI are described in architecture.md.
+Charging remains unimplemented.
 
 ## Layout and conventions
 
@@ -13,7 +14,13 @@ outside the implemented scope.
 - Three robots start at `(0, 0)`, `(0, 1)`, and `(0, 2)`, with IDs `robot-1`
   through `robot-3`, battery 100, and status `idle`.
 - Shelf obstacles occupy `(3, y)` and `(6, y)` for `y = 2..7` (12 cells).
-- Registered drop-off cells are `(9, 0)` and `(9, 9)`.
+- Registered drop-off cells are `(9, 0)` and `(9, 9)`. They are temporary robot
+  service cells. Delivered packages remain there; robots continue to their next
+  assigned pickup or leave for final parking/staging.
+- Staging cells are P1 `(7, 9)`, P2 `(8, 9)`, P3 `(8, 8)`. They cannot overlap
+  shelves, pickup/drop-off cells or each other. Temporary blocks make a staging
+  site unavailable; parking allocation excludes blocked, occupied and reserved
+  cells. Robot idle/final endpoints belong at staging after their assigned work.
 - Orders and temporary blocked cells start empty. Initialization uses no random
   data, generated IDs, timestamps, network calls, or external state.
 - Shelves are permanent impassable cells. Temporary blocks are separate and
@@ -386,3 +393,15 @@ Atomic execution tests inject failures after real temporary movement, pickup, an
 even completed delivery, and verify that the original snapshot remains identical.
 They also cover newly blocked routes, stale plans, repeated execution, and preservation
 of unrelated orders and robots.
+
+
+## Post-delivery movement
+
+The graph chains each robot's assignments without intermediate parking. After its
+last delivery it reserves a staging site and asks Route/Safety for an approved
+parking leg. `MovementPlan` stores endpoint-inclusive cells and the expected input
+revision. `execute_parking(warehouse, plan)` in `warehouse/movement.py` applies the
+empty-robot movement atomically through WarehouseSimulation, charging one battery
+point per step and publishing one revision on success. On rejection it returns no
+partial snapshot; the earlier delivered package remains delivered. A failed final
+departure stops dependent work and can be retried through a new Plan/Execute.

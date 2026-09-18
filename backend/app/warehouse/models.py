@@ -18,8 +18,8 @@ class DomainModel(BaseModel):
 class Position(DomainModel):
     """An integer (x, y) cell; warehouse bounds are checked by WarehouseState."""
 
-    x: int = Field(strict=True)
-    y: int = Field(strict=True)
+    x: int = Field(strict=True, description="Zero-based grid column, increasing to the right; must fit the supplied warehouse bounds.")
+    y: int = Field(strict=True, description="Zero-based grid row, increasing downward; must fit the supplied warehouse bounds.")
 
 
 class RobotStatus(str, Enum):
@@ -44,7 +44,7 @@ class Robot(DomainModel):
 
 
 class Package(DomainModel):
-    """Package identity and original pickup cell; its order owns the lifecycle."""
+    """Package identity and original pickup cell; after delivery its location is the order drop-off."""
 
     id: Identifier
     pickup: Position
@@ -62,7 +62,7 @@ class Order(DomainModel):
 
     id: Identifier
     package: Package
-    dropoff: Position
+    dropoff: Position = Field(description="Temporary robot service cell where this package remains after delivery; the robot must continue to later work or parking/staging.")
     status: OrderStatus = OrderStatus.PENDING
     assigned_robot_id: Identifier | None = None
 
@@ -104,7 +104,9 @@ class WarehouseState(DomainModel):
     blocked_cells: frozenset[Position] = frozenset()
     dropoff_locations: frozenset[Position] = Field(min_length=1)
     orders: tuple[Order, ...] = ()
-    parking_cells: tuple[Position, ...] = (Position(x=7, y=9), Position(x=8, y=9), Position(x=8, y=8))
+    parking_cells: tuple[Position, ...] = Field(
+        default=(Position(x=7, y=9), Position(x=8, y=9), Position(x=8, y=8)),
+        description="Ordered designated idle/final staging cells, distinct from shelves, pickups and drop-offs. Allocation excludes temporarily blocked, occupied or reserved cells.")
 
     @field_serializer("obstacles", "blocked_cells", "dropoff_locations")
     def serialize_cells(self, cells: frozenset[Position]) -> list[dict[str, int]]:

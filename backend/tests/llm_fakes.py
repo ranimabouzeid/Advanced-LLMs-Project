@@ -46,19 +46,9 @@ def automatic(schema, data):
     if schema is OrderSelection:
         return schema(order_id=data["pending_orders"][0]["id"], explanation="Mock selects oldest")
     if schema is FleetSelection:
-        warehouse = WarehouseState.model_validate(data.get("committed_warehouse", data["warehouse"]))
-        order_id = data["selected_order"]["id"]
-        available = [Robot.model_validate(r) for r in data["robots"] if r["status"] == "idle" and r["carried_package_id"] is None]
-        plans = []
-        for robot in available:
-            own = WarehouseState.model_validate({**warehouse.model_dump(), "robots": [
-                robot if r.id == robot.id else r for r in warehouse.robots]})
-            plans.append(plan_delivery(own, order_id, robot.id))
-        feasible = sorted((p for p in plans if p is not None and
-                           next(r for r in available if r.id == p.robot_id).battery >= p.total_steps),
-                          key=lambda p: (p.total_steps, p.robot_id))
-        chosen = feasible[0].robot_id if feasible else available[0].id if available else None
-        return schema(robot_id=chosen, explanation="Mock robot choice")
+        feasible = [c for c in data["candidates"] if c["feasible"]]
+        chosen = min(feasible, key=lambda c: (c["total_cost"], c["robot"]["id"])) if feasible else None
+        return schema(robot_id=chosen["robot"]["id"] if chosen else None, explanation="Mock minimum-cost choice" if chosen else "No feasible candidate: unavailable, unreachable or insufficient battery")
     warehouse = WarehouseState.model_validate(data["warehouse"])
     if schema is LLMMovementPlan:
         robot = next(r for r in warehouse.robots if r.id == data["robot_id"])

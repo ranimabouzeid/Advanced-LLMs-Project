@@ -18,7 +18,13 @@ def p(x, y):
 
 
 def scenario(assignments=("robot-1", "robot-2")):
-    sim = WarehouseSimulation()
+    base = WarehouseSimulation().state
+    # Scheduling fixtures deliberately choose feasible minima (including ties),
+    # while leaving the third robot offline to isolate the two-robot chains.
+    robots = [r.model_dump() for r in base.robots]
+    robots[1]["position"] = p(0, 4)
+    robots[2]["status"] = "offline"
+    sim = WarehouseSimulation(WarehouseState.model_validate({**base.model_dump(), "robots": robots}))
     for index, pickup in enumerate((p(4, 2), p(1, 4), p(4, 4))[:len(assignments)], 1):
         sim.create_order(f"o{index}", f"p{index}", pickup, p(9, 0))
     model = client(scripts={"FleetSelection": [dict(robot_id=rid, explanation="Independent choice") for rid in assignments]})
@@ -67,6 +73,12 @@ def test_r1_r2_r1_assignments_chain_without_intermediate_parking():
     assert fleet[2]["robots"][1]["position"] == {"x": 9, "y": 0}
     assert fleet[2]["robots"][0]["battery"] < 100
     assert fleet[2]["robot_forecasts"][0]["order_ids"] == ["o1"]
+    finalized = [data for schema, data, _ in model.calls if schema.__name__ == "SafetyDecision"
+                 and data.get("schedule_context", {}).get("phase") == "schedule_finalization"]
+    assert finalized[0]["schedule_context"]["next_order_id"] == "o3"
+    assert finalized[0]["schedule_context"]["departure"] == "next_pickup"
+    assert finalized[1]["schedule_context"]["next_order_id"] is None
+    assert finalized[1]["schedule_context"]["departure"] == "parking/staging"
     # One movement to parking per robot, after all its own assigned deliveries.
     assert sum(schema.__name__ == "LLMMovementPlan" for schema, _, _ in model.calls) == 2
     result = execute(ready, model)
@@ -266,3 +278,15 @@ def test_incorrect_llm_parking_approval_cannot_bypass_execution_checks():
     assert result.run_outcome == "partial" and result.warehouse.orders[0].status == "delivered"
     assert result.warehouse.robots[0].position == p(9, 0)
     assert result.robot_schedules[0].parking.status == "failed"
+
+
+def test_delivery_only_preview_cannot_execute_without_departure_schedule():
+    from app.graph import batch
+    state, model = scenario(("robot-1",))
+    ready = run(state, model)
+    preview = WarehouseGraphState.model_validate({**ready.model_dump(), "robot_schedules": (),
+        "command": "execute", "execution_requested": True})
+    update = batch.execution(preview)
+    assert update["run_outcome"] == "failed" and "warehouse" not in update
+    result = execute(preview, model)
+    assert result.run_outcome == "failed" and result.warehouse == state.warehouse

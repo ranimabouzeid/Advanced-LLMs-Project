@@ -1,7 +1,7 @@
 """Serializable workflow records with one authoritative warehouse snapshot.
 
 These schemas do not execute commands, validate route safety, or apply updates.
-Future tools receive warehouse from trusted runtime code, never LLM arguments.
+Tools receive committed or projected warehouse data from trusted runtime code.
 """
 
 from typing import Annotated, Literal, Self
@@ -25,28 +25,34 @@ class WorkflowModel(BaseModel):
 
 
 class OrderSelection(WorkflowModel):
-    """Structured selection; the enclosing state checks pending-order eligibility."""
+    """One pending order chosen by the Order LLM for this batch iteration."""
 
-    order_id: Identifier
-    explanation: ShortText
+    order_id: Identifier = Field(description="ID of one supplied eligible pending order; never invent an ID.")
+    explanation: ShortText = Field(description="Brief reason for selecting this order now.")
 
 
 class FleetSelection(WorkflowModel):
-    """The model chooses an available robot, or explicitly reports no suitable one."""
+    """A fresh Fleet LLM choice among feasible minimum-total-A*cost candidates."""
 
-    robot_id: Identifier | None
-    explanation: ShortText
+    robot_id: Identifier | None = Field(description="ID of a supplied feasible minimum-total-cost robot; null only if none is feasible. Use exact A* costs, never estimated distances. Previous assignments create no preference.")
+    explanation: ShortText = Field(description="Why this robot has minimum supplied A* total cost given its actual projected position, battery, workload and availability; explain any choice among tied minima.")
 
 
 class LLMRoutePlan(WorkflowModel):
-    """Model-authored geometry; no planner fills in or repairs these coordinates."""
+    """LLM-generated pickup and delivery legs for one assignment, excluding final parking/staging.
 
-    robot_id: Identifier
-    order_id: Identifier
-    outcome: Literal["planned", "unreachable"] = "planned"
-    route_to_pickup: tuple[Position, ...] | None = Field(default=None, min_length=1, max_length=201)
-    route_to_dropoff: tuple[Position, ...] | None = Field(default=None, min_length=1, max_length=201)
-    explanation: ShortText
+    The drop-off is a temporary service cell: the package remains delivered there,
+    while the robot continues to its next pickup or a separately planned parking cell.
+    """
+
+    robot_id: Identifier = Field(description="The supplied selected robot ID; do not select another robot.")
+    order_id: Identifier = Field(description="The supplied selected order ID; do not select another order.")
+    outcome: Literal["planned", "unreachable"] = Field(default="planned", description="planned requires both route legs; unreachable requires both legs to be null.")
+    route_to_pickup: tuple[Position, ...] | None = Field(default=None, min_length=1, max_length=201,
+        description="Endpoint-inclusive orthogonal cells from supplied robot position to this pickup. For later assigned work, this is previous drop-off -> next pickup directly, with no parking visit in between. Null only when unreachable.")
+    route_to_dropoff: tuple[Position, ...] | None = Field(default=None, min_length=1, max_length=201,
+        description="Endpoint-inclusive orthogonal cells from this pickup to its drop-off. The package remains delivered at the drop-off; this leg does not specify the robot's permanent final position or parking movement. Null only when unreachable.")
+    explanation: ShortText = Field(description="Brief route rationale, response to retry feedback, or reason the assignment is unreachable.")
 
     @model_validator(mode="after")
     def routes_match_outcome(self) -> Self:
@@ -58,11 +64,16 @@ class LLMRoutePlan(WorkflowModel):
 
 
 class SafetyDecision(WorkflowModel):
-    """LLM approval is a decision, not a deterministic validation certificate."""
+    """LLM assessment of the currently supplied route and context, with actionable retry feedback.
 
-    approved: bool = Field(strict=True)
-    conflicts: tuple[ShortText, ...] = Field(default=(), max_length=100)
-    explanation: ShortText
+    Approval applies only to this delivery or parking/staging movement;
+    deterministic execution still protects state integrity.
+    """
+
+    approved: bool = Field(strict=True, description="True only if this supplied route is approved in its current context; does not approve other routes or execute movement.")
+    conflicts: tuple[ShortText, ...] = Field(default=(), max_length=100,
+        description="Specific rejection findings: identify the leg, cell or robot and needed correction where applicable. Must be empty when approved.")
+    explanation: ShortText = Field(description="Reason for the decision; when rejected, give specific feedback Route can use to produce a corrected route.")
 
     @model_validator(mode="after")
     def consistent_decision(self) -> Self:
@@ -80,15 +91,19 @@ class NodeActivity(WorkflowModel):
 
 
 class PlannedDelivery(WorkflowModel):
-    """One ordered proposal/result; no parallel assignment or status arrays."""
+    """One batch assignment and its delivery result, separate from the robot's final parking.
 
-    order_id: Identifier
-    selection: OrderSelection | None = None
-    robot_id: Identifier | None = None
-    delivery_plan: DeliveryPlan | None = None
-    safety: SafetyDecision | None = None
-    status: Literal["approved", "unplannable", "stale", "delivered", "failed", "not_executed"]
-    reason: ShortText | None = None
+    Delivered means the package stays at its order's drop-off; robot departure
+    belongs to the next assignment's pickup leg or the robot schedule's parking leg.
+    """
+
+    order_id: Identifier = Field(description="Order ID uniquely identifying this batch assignment.")
+    selection: OrderSelection | None = Field(default=None, description="Order LLM selection that produced this assignment.")
+    robot_id: Identifier | None = Field(default=None, description="Robot selected by a fresh Fleet decision, or null when no assignment is available.")
+    delivery_plan: DeliveryPlan | None = Field(default=None, description="Model-authored pickup and delivery routes; excludes final parking/staging.")
+    safety: SafetyDecision | None = Field(default=None, description="Safety assessment for this delivery; null means unchecked.")
+    status: Literal["approved", "unplannable", "stale", "delivered", "failed", "not_executed"] = Field(description="Planning or execution result for the package delivery, independent of final parking status.")
+    reason: ShortText | None = Field(default=None, description="Reason this assignment is stale, unplannable, failed or not executed.")
 
     @model_validator(mode="after")
     def consistent_assignment(self) -> Self:
@@ -108,22 +123,33 @@ class PlannedDelivery(WorkflowModel):
 
 
 class RobotForecast(WorkflowModel):
-    """Independent assignment timeline; endpoints need not be simultaneous occupancy."""
-    robot: Robot
-    order_ids: tuple[Identifier, ...] = ()
+    """Planning-only robot state after its assignment sequence, before final parking.
+
+    A drop-off endpoint is temporary, not idle parking. Independent forecasts
+    may share that service cell; finalized schedules resolve physical occupancy.
+    """
+    robot: Robot = Field(description="Projected position, remaining battery and availability after these assignments; not committed state. Position may temporarily be the latest drop-off. Final parking cost is not yet included.")
+    order_ids: tuple[Identifier, ...] = Field(default=(), description="Assignment order for this robot so far. Each later pickup starts directly from the preceding drop-off; an empty sequence means no batch work yet.")
 
 
 class LLMMovementPlan(WorkflowModel):
-    robot_id: Identifier
-    route: tuple[Position, ...] = Field(min_length=1, max_length=201)
-    explanation: ShortText
+    """LLM-generated final departure to parking/staging when no assigned order remains.
+
+    The delivered package stays at the drop-off while the empty robot leaves.
+    Continuation to another pickup belongs to that assignment, not this result.
+    """
+    robot_id: Identifier = Field(description="ID of the supplied robot with no further assigned work.")
+    route: tuple[Position, ...] = Field(min_length=1, max_length=201,
+        description="Endpoint-inclusive orthogonal cells from supplied current position, normally the final drop-off, to the reserved free parking/staging cell. Never end at a pickup or drop-off.")
+    explanation: ShortText = Field(description="Why this final departure reaches the reserved cell safely, including changes requested by Safety on retry.")
 
 
 class PlannedParking(WorkflowModel):
-    plan: MovementPlan
-    safety: SafetyDecision | None
-    status: Literal["approved", "stale", "completed", "failed", "not_executed"] = "approved"
-    reason: ShortText | None = None
+    """Final parking/staging proposal and result, committed separately from delivery."""
+    plan: MovementPlan = Field(description="Empty-robot departure after its last assignment, bound to the projected input revision.")
+    safety: SafetyDecision | None = Field(description="Safety LLM decision for this parking route; null means unchecked or invalidated.")
+    status: Literal["approved", "stale", "completed", "failed", "not_executed"] = Field(default="approved", description="Parking movement result; failure does not undo already completed package deliveries.")
+    reason: ShortText | None = Field(default=None, description="Diagnostic for stale, failed or unexecuted parking movement.")
 
     @model_validator(mode="after")
     def approval(self):
@@ -133,10 +159,15 @@ class PlannedParking(WorkflowModel):
 
 
 class RobotSchedule(WorkflowModel):
-    robot_id: Identifier
-    order_ids: tuple[Identifier, ...] = ()
-    parking: PlannedParking
-    projected_robot: Robot
+    """Ordered robot assignments with direct pickup chaining and one final parking leg.
+
+    Final projected position is parking/staging, never a drop-off. An empty
+    assignment sequence permits parking-only recovery after a failed departure.
+    """
+    robot_id: Identifier = Field(description="Robot that owns this schedule and its exclusive parking reservation.")
+    order_ids: tuple[Identifier, ...] = Field(default=(), description="Ordered references to this robot's PlannedDelivery records. Follow each drop-off directly with the next pickup; no intermediate parking. Empty for parking-only recovery.")
+    parking: PlannedParking = Field(description="One final parking/staging movement after all listed assignments; no other robot may reserve its destination.")
+    projected_robot: Robot = Field(description="Final projected idle robot at parking/staging with battery reduced by all delivery and final departure steps; not committed until execution succeeds.")
 
     @model_validator(mode="after")
     def identity(self):
@@ -158,7 +189,7 @@ class WarehouseGraphState(WorkflowModel):
     its own deterministic data-integrity and atomic-movement checks.
     """
 
-    warehouse: WarehouseState
+    warehouse: WarehouseState = Field(description="Authoritative committed warehouse at graph level; role-local views may contain planning-only projected state.")
     command: Command
     execution_requested: bool = Field(default=False, strict=True)
     order_selection: OrderSelection | None = None
@@ -171,14 +202,14 @@ class WarehouseGraphState(WorkflowModel):
     run_outcome: RunOutcome = "idle"
     error_message: ShortText | None = None
     node_activity: tuple[NodeActivity, ...] = Field(default_factory=tuple)
-    planned_deliveries: tuple[PlannedDelivery, ...] = ()
+    planned_deliveries: tuple[PlannedDelivery, ...] = Field(default=(), description="Batch assignments and delivery outcomes; finalized records follow per-robot schedule execution order.")
     batch_revision: int | None = Field(default=None, ge=0, strict=True)
     # Scratch channels exist only while planning. warehouse remains authoritative.
     projected_warehouse: WarehouseState | None = None
     planning_queue: tuple[Identifier, ...] = ()
     planning_index: int = Field(default=0, ge=0, strict=True)
-    robot_forecasts: tuple[RobotForecast, ...] = ()
-    robot_schedules: tuple[RobotSchedule, ...] = ()
+    robot_forecasts: tuple[RobotForecast, ...] = Field(default=(), description="Independent planning-only timelines supplied to each fresh Fleet decision; cleared after finalization.")
+    robot_schedules: tuple[RobotSchedule, ...] = Field(default=(), description="Finalized sequential robot schedules, each ending at a distinct parking/staging cell after its last assignment.")
 
     @property
     def warehouse_revision(self) -> int:

@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 def workspace(state: WarehouseGraphState, **overrides) -> WarehouseGraphState:
-    """Adapt the active proposal to a role's existing single-delivery contract."""
+    """Build a role-local view without mutating committed state.
+
+    Assignment previews follow only the selected robot's forecast; finalization
+    resolves all robots' physical occupancy in schedule order."""
     fields = {name: getattr(state, name) for name in (
         "command", "execution_requested", "order_selection", "selected_robot_id",
         "delivery_plan", "planning_outcome", "safety", "replan_count", "max_replans",
@@ -42,6 +45,9 @@ def workspace(state: WarehouseGraphState, **overrides) -> WarehouseGraphState:
 
 
 def start_planning(state: WarehouseGraphState, *, replacement: bool = False) -> StateUpdate:
+    """Initialize pending assignments and independent forecasts from committed state.
+
+    Clear prior proposals and execution intent; replacement consumes one retry."""
     return dict(projected_warehouse=state.warehouse,
                 planning_queue=tuple(o.id for o in state.warehouse.orders if o.status == OrderStatus.PENDING),
                 planning_index=0, planned_deliveries=(), batch_revision=state.warehouse.revision,
@@ -53,6 +59,7 @@ def start_planning(state: WarehouseGraphState, *, replacement: bool = False) -> 
 
 
 def dispatch(state: WarehouseGraphState) -> StateUpdate:
+    """Start assignment planning or request schedule review for an explicit Execute."""
     if state.command == "plan":
         return start_planning(state)
     return dict(execution_requested=True, error_message=None, run_outcome="running",
@@ -60,6 +67,7 @@ def dispatch(state: WarehouseGraphState) -> StateUpdate:
 
 
 def order(state: WarehouseGraphState, *, client: BaseChatModel, tools: OrderTools | None = None) -> StateUpdate:
+    """Choose the next pending assignment after clearing prior robot, route and Safety fields."""
     current = workspace(state, order_selection=None, selected_robot_id=None,
                         delivery_plan=None, safety=None, execution_requested=False)
     update = order_agent(current, client=client, tools=tools,
@@ -70,6 +78,7 @@ def order(state: WarehouseGraphState, *, client: BaseChatModel, tools: OrderTool
 
 def fleet(state: WarehouseGraphState, *, client: BaseChatModel,
           tools: FleetTools | None = None) -> StateUpdate:
+    """Invoke Fleet afresh with all robot forecasts and retain the batch retry budget."""
     current = workspace(state)
     update = fleet_agent(current, client=client, tools=tools)
     # Correlate each decision with its input projection, without logging prompts,
@@ -84,16 +93,15 @@ def fleet(state: WarehouseGraphState, *, client: BaseChatModel,
 
 
 def route(state: WarehouseGraphState, *, client: BaseChatModel, tools: RouteTools | None = None) -> StateUpdate:
+    """Generate an LLM delivery preview on the selected robot timeline, preserving batch retries."""
     return {**route_agent(workspace(state), client=client, tools=tools), "replan_count": state.replan_count}
 
 
 def project(warehouse: WarehouseState, plan: DeliveryPlan) -> WarehouseState:
-    """Hypothetical post-delivery data, NOT route validation or actual execution.
+    """Project an approved delivery endpoint and battery cost without executing movement.
 
-    Assume the model-approved delivery succeeds; enforce only immutable domain
-    record constraints (battery range, unique occupancy, lifecycle consistency).
-    The real executor alone checks every movement and can reject the proposal.
-    """
+    The package remains delivered at the drop-off; the robot is only temporarily
+    there until its next pickup leg or final parking/staging departure."""
     order = next(order for order in warehouse.orders if order.id == plan.order_id)
     data = warehouse.model_dump()
     data["revision"] += 1
@@ -108,66 +116,21 @@ def project(warehouse: WarehouseState, plan: DeliveryPlan) -> WarehouseState:
 
 def safety(state: WarehouseGraphState, *, client: BaseChatModel,
            tools: SafetyTools | None = None) -> StateUpdate:
+    """Assess a planning preview or review finalized schedules through the shared Safety LLM."""
     if state.robot_schedules and state.projected_warehouse is None:
         from .schedules import review
         return review(state, client=client, safety_tools=tools)
     if state.projected_warehouse is not None:
         return safety_agent(workspace(state), tools=tools, client=client)
-    if not any(item.status in ("approved", "stale") for item in state.planned_deliveries):
-        return dict(run_outcome="failed", execution_requested=False, safety=None,
-                    error_message="Safety requires an unconsumed batch proposal",
-                    node_activity=(*state.node_activity, NodeActivity(node="safety", status="failed",
-                        message="Safety requires an unconsumed batch proposal")))
-    projected = state.warehouse
-    activity = state.node_activity
-    checked = []
-    for index, item in enumerate(state.planned_deliveries):
-        if item.status not in ("approved", "stale"):
-            checked.append(item)
-            continue
-        local = WarehouseGraphState(warehouse=projected, command="execute", execution_requested=True,
-                    order_selection=item.selection, selected_robot_id=item.robot_id,
-                    delivery_plan=item.delivery_plan, node_activity=activity)
-        update = safety_agent(local, tools=tools, client=client)
-        activity = update["node_activity"]
-        if activity[-1].status == "failed":
-            return update  # No retry for provider or schema failures.
-        # Revision identity is a data-integrity guard, not an alternate safety decision.
-        if item.delivery_plan.warehouse_revision != projected.revision:
-            stale = PlannedDelivery.model_validate({**item.model_dump(), "status": "stale",
-                "safety": update["safety"], "reason": "Warehouse revision changed; review a new batch"})
-            return {**update, "run_outcome": "failed", "execution_requested": False,
-                    "planning_outcome": "stale", "error_message": stale.reason,
-                    "planned_deliveries": (*checked, stale, *state.planned_deliveries[index + 1:])}
-        if not update["safety"].approved:
-            # Keep the reviewed prefix, retry this Route, then rebuild the dependent
-            # suffix from the resulting projection. Nothing executes in this call.
-            previous_ids = tuple(record.order_id for record in checked)
-            remaining = tuple(order.id for order in state.warehouse.orders
-                              if order.status == OrderStatus.PENDING
-                              and order.id not in (*previous_ids, item.order_id))
-            return {**update, "projected_warehouse": projected,
-                    "batch_revision": state.warehouse_revision,
-                    "planning_queue": (*previous_ids, item.order_id, *remaining),
-                    "planning_index": len(previous_ids), "planned_deliveries": tuple(checked),
-                    "order_selection": item.selection, "selected_robot_id": item.robot_id,
-                    "delivery_plan": item.delivery_plan, "planning_outcome": "planned"}
-        checked.append(PlannedDelivery.model_validate({**item.model_dump(), "status": "approved",
-                                                       "safety": update["safety"], "reason": None}))
-        try:
-            projected = project(projected, item.delivery_plan)
-        except ValueError:
-            return dict(run_outcome="failed", execution_requested=False,
-                        error_message="Projected delivery violates warehouse data constraints",
-                        node_activity=(*activity, NodeActivity(node="execution", status="rejected",
-                            message="Projected delivery violates warehouse data constraints")))
-    first = next(item for item in checked if item.status == "approved")
-    return dict(planned_deliveries=tuple(checked), safety=first.safety, run_outcome="ready",
-                planning_outcome="planned", node_activity=activity)
+    return dict(run_outcome="failed", execution_requested=False, safety=None,
+                error_message="Safety requires a finalized unconsumed robot schedule",
+                node_activity=(*state.node_activity, NodeActivity(node="safety", status="failed",
+                    message="Safety requires a finalized unconsumed robot schedule")))
 
 
 def retry_route(state: WarehouseGraphState, *, client: BaseChatModel,
                 tools: RouteTools | None = None) -> StateUpdate:
+    """Consume one retry and request new LLM coordinates using the rejected route and feedback."""
     if state.safety is None or state.safety.approved or state.replan_count >= state.max_replans:
         return failure(state)
     local = WarehouseGraphState.model_validate({**state.model_dump(),
@@ -176,7 +139,10 @@ def retry_route(state: WarehouseGraphState, *, client: BaseChatModel,
 
 
 def collect(state: WarehouseGraphState) -> StateUpdate:
-    """Record a feasible or unplannable order and advance the private projection."""
+    """Record the assignment and advance its robot's independent forecast.
+
+    Subtract delivery steps and temporarily place the robot at the drop-off;
+    parking is deferred until every batch assignment has been considered."""
     if not state.planning_queue:
         return {}
     approved = state.run_outcome == "ready"
@@ -210,6 +176,7 @@ def collect(state: WarehouseGraphState) -> StateUpdate:
 
 
 def finish(state: WarehouseGraphState) -> StateUpdate:
+    """Clear planning scratch state and summarize the first approved delivery without executing it."""
     approved = next((item for item in state.planned_deliveries if item.status == "approved"), None)
     outcome = "ready" if approved else state.run_outcome
     if outcome == "running":
@@ -226,10 +193,12 @@ def finish(state: WarehouseGraphState) -> StateUpdate:
 
 
 def replan(state: WarehouseGraphState) -> StateUpdate:
+    """Rebuild assignments from committed state with one retry consumed and execution intent cleared."""
     return start_planning(state, replacement=True)
 
 
 def failure(state: WarehouseGraphState) -> StateUpdate:
+    """Stop the command, clear planning scratch state and intent, and retain committed warehouse data."""
     return dict(run_outcome="failed", execution_requested=False,
                 robot_forecasts=(),
                 projected_warehouse=None, planning_queue=(), planning_index=0,
@@ -239,48 +208,16 @@ def failure(state: WarehouseGraphState) -> StateUpdate:
 
 
 def apply_delivery(warehouse: WarehouseState, plan: DeliveryPlan) -> DeliveryExecutionResult:
-    """Execution boundary, separately testable from private projection."""
+    """Atomically execute one model-approved delivery; simulation may reject invalid movement."""
     return WarehouseSimulation(warehouse).execute_delivery(plan)
 
 
 def execution(state: WarehouseGraphState) -> StateUpdate:
-    if state.robot_schedules:
-        from .schedules import execute
-        return execute(state)
-    if (state.command != "execute" or not state.execution_requested or state.run_outcome != "ready"
-            or state.batch_revision != state.warehouse_revision
-            or any(item.status not in ("approved", "unplannable") for item in state.planned_deliveries)
-            or not any(item.status == "approved" for item in state.planned_deliveries)):
+    """Execute only finalized schedules that include departure to parking/staging.
+
+    Delivery-only previews cannot execute and leave robots on service cells.
+    """
+    if not state.robot_schedules:
         return failure(state)
-    warehouse = state.warehouse
-    records = []
-    stopped = False
-    completed = 0
-    for item in state.planned_deliveries:
-        if item.status != "approved":
-            records.append(item)
-            continue
-        if stopped:
-            records.append(PlannedDelivery.model_validate({**item.model_dump(), "status": "not_executed",
-                "reason": "Earlier delivery failed; dependent remainder requires a new Plan"}))
-            continue
-        # The domain executor revalidates immediately before its atomic transition.
-        result = apply_delivery(warehouse, item.delivery_plan)
-        if result.success:
-            warehouse = result.final_state
-            completed += 1
-            records.append(PlannedDelivery.model_validate({**item.model_dump(), "status": "delivered"}))
-        else:
-            stopped = True
-            records.append(PlannedDelivery.model_validate({**item.model_dump(), "status": "failed",
-                "reason": f"Atomic delivery failed during {result.failed_stage}"}))
-    # Expected domain failure is a completed command with explicit per-order results.
-    # Unexpected exceptions propagate and the session keeps its prior checkpoint.
-    outcome = "partial" if stopped and completed else "failed" if stopped else "delivered"
-    return dict(warehouse=warehouse, planned_deliveries=tuple(records), run_outcome=outcome,
-                order_selection=None, selected_robot_id=None, delivery_plan=None, safety=None,
-                planning_outcome="not_planned", execution_requested=False,
-                error_message="Batch stopped; review per-order results and Plan again" if stopped else None,
-                node_activity=(*state.node_activity, NodeActivity(node="execution",
-                    status="rejected" if stopped else "completed",
-                    message=f"Completed {completed} deliveries")))
+    from .schedules import execute
+    return execute(state)

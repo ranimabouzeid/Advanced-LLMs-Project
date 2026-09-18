@@ -136,3 +136,8 @@ The optional live smoke script checks OrderSelection connectivity; it does not
 certify the quality of Fleet, Route, or Safety decisions.
 The in-memory session/checkpoint store is process-local; restart the backend after
 code changes. Sessions do not persist across process restarts.
+
+
+Schema-guidance and parking verification: **554 backend tests and 58 frontend tests**
+pass offline. Frontend build, pip check and git diff --check pass. No new dependency
+or live Groq request was needed. The existing Starlette deprecation warning remains.

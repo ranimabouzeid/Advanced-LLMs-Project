@@ -14,6 +14,8 @@ export default function WarehouseGrid({ state, selectedCell, onSelect }) {
     || (!plan ? state.robot_schedules?.[0] : null);
   const departure = schedule && (schedule.order_ids.length === 0 || schedule.order_ids.at(-1) === (selected?.order_id || state.order_selection?.order_id))
     ? schedule.parking.plan : null;
+  const assignmentIndex = schedule?.order_ids.indexOf(selected?.order_id) ?? -1;
+  const nextOrder = assignmentIndex >= 0 ? schedule.order_ids[assignmentIndex + 1] : null;
   const stale = plan && (selected ? selected.status === 'stale' || (selected.status === 'approved' && state.batch_revision !== w.revision) : state.planning_outcome === 'stale' || plan.warehouse_revision !== w.revision);
   function leg(route, name) {
     return <g className={`route-${name}`} data-testid={`${name}-route`}>
@@ -27,16 +29,22 @@ export default function WarehouseGrid({ state, selectedCell, onSelect }) {
     {routes.length > 0 && <label>Delivery route<select aria-label="Delivery route" value={selected.order_id} onChange={event => setRouteOrder(event.target.value)}>
       {routes.map((item, index) => <option key={item.order_id} value={item.order_id}>{index + 1}. {item.order_id} → {item.robot_id} ({item.status})</option>)}
     </select><span className="muted">Routes run sequentially. Later routes start from projected positions.</span></label>}
+    <p className="muted">Packages stay delivered at drop-off. Robots continue to their next pickup or finish at parking/staging.</p>
+    {nextOrder && <button type="button" onClick={() => setRouteOrder(nextOrder)}>
+      After delivery: view drop-off to next pickup ({nextOrder})
+    </button>}
     {stale && <p className="stale-label">Stale route - not approved for execution. Execute will revalidate.</p>}
     <div className={`floor ${stale ? 'stale' : ''}`} style={{ '--columns': w.width, '--rows': w.height }}>
       {Array.from({ length: w.width * w.height }, (_, index) => {
         const x = index % w.width, y = Math.floor(index / w.width), id = `${x},${y}`;
         const robots = w.robots.filter(r => key(r.position) === id);
         const packages = w.orders.filter(o => ['pending', 'assigned'].includes(o.status) && key(o.package.pickup) === id);
+        const delivered = w.orders.filter(o => o.status === 'delivered' && key(o.dropoff) === id);
         const labels = [shelves.has(id) && 'shelf', blocks.has(id) && 'blocked', drops.has(id) && 'drop-off',
           parking.has(id) && `parking ${parking.get(id)}`,
           ...robots.map(r => `${r.id}${r.carried_package_id ? ` carrying ${r.carried_package_id}` : ''}`),
-          ...packages.map(o => `package ${o.package.id}`)].filter(Boolean);
+          ...packages.map(o => `package ${o.package.id}`),
+          ...delivered.map(o => `delivered package ${o.package.id}`)].filter(Boolean);
         return <button type="button" key={id} data-cell={id} aria-label={`Cell (${x}, ${y})${labels.length ? ': ' + labels.join(', ') : ''}`}
           aria-pressed={selectedCell ? key(selectedCell) === id : false} onClick={() => onSelect({ x, y })}
           className={`cell ${shelves.has(id) ? 'shelf' : ''} ${blocks.has(id) ? 'blocked' : ''}`}>
@@ -45,6 +53,7 @@ export default function WarehouseGrid({ state, selectedCell, onSelect }) {
             {drops.has(id) && <span className="drop-marker" title="Registered drop-off">&darr;</span>}
             {parking.has(id) && <span className="parking-marker" title="Staging cell">{parking.get(id)}</span>}
             {packages.length > 0 && <span className="package-marker" title={packages.map(o => o.package.id).join(', ')}>&#9671;{packages.length > 1 ? packages.length : ''}</span>}
+            {delivered.length > 0 && <span className="package-marker" title={`Delivered: ${delivered.map(o => o.package.id).join(', ')}`}>&#9671;{delivered.length > 1 ? delivered.length : ''}</span>}
             {robots.map(r => <span key={r.id} title={r.id} className={`robot-marker ${(selected?.robot_id || state.selected_robot_id) === r.id ? 'selected-robot' : ''}`}>R{r.id.replace('robot-', '')}{r.carried_package_id && <small>&#9671;</small>}</span>)}
           </span>
         </button>;

@@ -21,7 +21,7 @@ it.each(['pending','assigned'])('shows %s package at pickup', status => {
 });
 it.each(['picked_up','delivered'])('does not leave %s package at pickup', status => {
   const s=structuredClone(ready); s.warehouse.orders[0].status=status; draw(s);
-  expect(screen.queryByRole('button', { name: /package p/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Cell \(2, 0\).*package p/ })).not.toBeInTheDocument();
 });
 it('groups packages and identifies a carrying selected robot', () => {
   const s=structuredClone(ready); s.warehouse.orders.push({ ...s.warehouse.orders[0], id:'other',package:{id:'p2',pickup:{x:2,y:0}} });
@@ -96,7 +96,9 @@ it('labels staging cells and draws parking only after the robot final assignment
   expect(screen.getByRole('button', { name: /Cell \(8, 9\).*parking P2/ })).toBeVisible();
   expect(screen.getByRole('button', { name: /Cell \(8, 8\).*parking P3/ })).toBeVisible();
   expect(screen.queryByTestId('parking-route')).not.toBeInTheDocument();
-  await userEvent.selectOptions(screen.getByLabelText('Delivery route'), 'last');
+  await userEvent.click(screen.getByRole('button', { name: /After delivery: view drop-off to next pickup \(last\)/ }));
+  expect(screen.getByLabelText('Delivery route')).toHaveValue('last');
+  expect(screen.queryByRole('button', { name: /After delivery: view/ })).not.toBeInTheDocument();
   expect(screen.getByTestId('parking-route').querySelector('polyline')).toHaveAttribute('points', '9.5,0.5 7.5,9.5');
 });
 
@@ -108,4 +110,16 @@ it('draws a parking-only recovery proposal', () => {
   draw(s);
   expect(screen.getByTestId('parking-route')).toBeVisible();
   expect(screen.queryByTestId('pickup-route')).not.toBeInTheDocument();
+});
+
+it('keeps delivered packages at the service cell after the robot parks', () => {
+  const s = structuredClone(ready);
+  const order = s.warehouse.orders[0];
+  order.status = 'delivered';
+  s.warehouse.robots[0].position = { x: 7, y: 9 };
+  draw(s);
+  const dropoff = screen.getByRole('button', { name: new RegExp(`Cell \\(${order.dropoff.x}, ${order.dropoff.y}\\).*delivered package ${order.package.id}`) });
+  expect(dropoff).not.toHaveAccessibleName(/robot-1/);
+  expect(screen.getByTitle(`Delivered: ${order.package.id}`)).toBeVisible();
+  expect(screen.getByRole('button', { name: /Cell \(7, 9\).*robot-1/ })).toBeVisible();
 });

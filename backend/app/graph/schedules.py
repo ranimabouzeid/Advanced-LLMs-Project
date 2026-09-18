@@ -12,13 +12,17 @@ class ScheduleUnavailable(ValueError):
 
 
 def project_parking(warehouse, plan):
-    """Project endpoint/cost only. Simulation validates actual movement later."""
+    """Derive final projected position and battery after parking without mutating committed state.
+
+    Endpoint integrity is validated here; actual movement is checked at execution.
+    """
     return WarehouseState.model_validate({**warehouse.model_dump(), "revision": warehouse.revision + 1,
         "robots": [{**r.model_dump(), "position": plan.route[-1], "battery": r.battery - plan.total_steps}
                    if r.id == plan.robot_id else r for r in warehouse.robots]})
 
 
 def parking_target(warehouse, robot_id, reserved):
+    """Choose the first free designated staging cell, excluding pickups and other reservations."""
     excluded = (warehouse.obstacles | warehouse.blocked_cells | warehouse.dropoff_locations
                 | {o.package.pickup for o in warehouse.orders}
                 | {r.position for r in warehouse.robots if r.id != robot_id} | set(reserved))
@@ -26,7 +30,12 @@ def parking_target(warehouse, robot_id, reserved):
 
 
 def finalize(state, *, client, route_tools=None, safety_tools=None):
-    """Group by first robot assignment, retain each robot's order sequence, park once."""
+    """Finalize assignment forecasts into sequential robot schedules without committed movement.
+
+    Each robot chains drop-off -> next pickup, then parks once after its last
+    assignment. Route/Safety use the shared LLM with bounded retries. A failed
+    finalization leaves no actionable partial schedule.
+    """
     assignments = [item for item in state.planned_deliveries if item.status == "approved"]
     robots = list(dict.fromkeys(item.robot_id for item in assignments))
     # Recover idle robots left on service cells by a previously rejected parking
@@ -40,17 +49,21 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
     try:
         for robot_id in robots:
             group = [item for item in assignments if item.robot_id == robot_id]
-            for item in group:
+            for index, item in enumerate(group):
+                next_item = group[index + 1] if index + 1 < len(group) else None
+                context = {"phase": "schedule_finalization", "order_ids": [d.order_id for d in group],
+                           "next_order_id": next_item.order_id if next_item else None,
+                           "departure": "next_pickup" if next_item else "parking/staging"}
                 local = WarehouseGraphState(warehouse=warehouse, command="plan",
                     order_selection=item.selection, selected_robot_id=robot_id,
                     node_activity=activity, replan_count=count, max_replans=state.max_replans)
                 while True:
-                    update = route_agent(local, client=client, tools=route_tools)
+                    update = route_agent(local, client=client, tools=route_tools, schedule_context=context)
                     local = WarehouseGraphState.model_validate({**local.model_dump(), **update, "replan_count": count})
                     activity = local.node_activity
                     if local.run_outcome != "running":
                         raise ScheduleUnavailable("Final delivery route unavailable")
-                    update = safety_agent(local, client=client, tools=safety_tools)
+                    update = safety_agent(local, client=client, tools=safety_tools, schedule_context=context)
                     local = WarehouseGraphState.model_validate({**local.model_dump(), **update})
                     activity = local.node_activity
                     if local.safety is None:
@@ -106,22 +119,32 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
 
 
 def review(state, *, client, safety_tools=None):
+    """Reassess every finalized delivery and parking leg with the LLM before execution.
+
+    Rejection or revision mismatch requests a review-only replacement; provider
+    failures stop the command. All intermediate warehouse changes are projected.
+    """
     warehouse, activity = state.warehouse, state.node_activity
     records, schedules = [], []
     by_id = {item.order_id: item for item in state.planned_deliveries}
 
     def rejected(message):
+        """Request bounded replacement planning with execution intent revoked."""
         return dict(run_outcome="failed", execution_requested=False, planning_outcome="stale",
                     error_message=message, node_activity=activity, safety=None)
 
     try:
         for schedule in state.robot_schedules:
-            for order_id in schedule.order_ids:
+            for index, order_id in enumerate(schedule.order_ids):
                 item = by_id[order_id]
                 local = WarehouseGraphState(warehouse=warehouse, command="execute", execution_requested=True,
                     order_selection=item.selection, selected_robot_id=item.robot_id,
                     delivery_plan=item.delivery_plan, node_activity=activity)
-                update = safety_agent(local, client=client, tools=safety_tools)
+                next_order = schedule.order_ids[index + 1] if index + 1 < len(schedule.order_ids) else None
+                update = safety_agent(local, client=client, tools=safety_tools, schedule_context={
+                    "phase": "execute_review", "order_ids": list(schedule.order_ids),
+                    "next_order_id": next_order, "departure": "next_pickup" if next_order else "parking/staging",
+                    "parking_target": schedule.parking.plan.route[-1].model_dump()})
                 activity = update["node_activity"]
                 if activity[-1].status == "failed":
                     return {**update, "node_activity": activity}
@@ -150,7 +173,13 @@ def review(state, *, client, safety_tools=None):
 
 
 def execute(state):
+    """Apply approved schedules with atomic delivery and parking simulation steps.
+
+    Typed movement failure retains completed steps and stops dependent work;
+    unexpected errors propagate so the session preserves its previous commit.
+    """
     if (state.command != "execute" or not state.execution_requested or state.run_outcome != "ready"
+            or not state.robot_schedules
             or state.batch_revision != state.warehouse_revision
             or any(s.parking.status != "approved" or not s.parking.safety.approved for s in state.robot_schedules)
             or any(d.status not in ("approved", "unplannable") for d in state.planned_deliveries)):

@@ -93,6 +93,7 @@ class SessionCoordinator:
 
     @contextmanager
     def _guard(self, session_id: str):
+        """Hold a nonblocking per-session guard so reads and commands observe one committed checkpoint."""
         # Resolve and acquire together so reset cannot retire a resolved entry.
         with self._registry_lock:
             entry = self._registry.get(session_id)
@@ -110,6 +111,7 @@ class SessionCoordinator:
             entry.guard.release()
 
     def _read(self, config: RunnableConfig):
+        """Load only the specified checkpoint and revalidate its typed warehouse and schedules."""
         snapshot = self._graph.get_state(deepcopy(config))
         if not snapshot.config or not snapshot.config.get("configurable", {}).get("checkpoint_id"):
             raise SessionExecutionError("Checkpoint is missing")
@@ -119,6 +121,7 @@ class SessionCoordinator:
     def _publish(self, config: RunnableConfig, state: WarehouseGraphState):
         # execution has only an END edge. Attribution writes data without calling
         # that node or scheduling any agent; every channel is explicitly replaced.
+        """Publish a complete checkpoint without invoking agents or scheduling execution."""
         updated = self._graph.update_state(deepcopy(config), state.model_dump(), as_node="execution")
         snapshot, reconstructed = self._read(updated)
         if snapshot.next or reconstructed != state:
@@ -147,6 +150,10 @@ class SessionCoordinator:
             return self._read(entry.committed)[1]
 
     def _command(self, session_id: str, command: str) -> WarehouseGraphState:
+        """Run one guarded command and publish only its completed, validated checkpoint.
+
+        Typed execution failures may retain completed deliveries; unexpected failures
+        leave the previous committed checkpoint authoritative."""
         with self._guard(session_id) as entry:
             state = self._read(entry.committed)[1]
             if command == "execute" and not any(
@@ -165,12 +172,15 @@ class SessionCoordinator:
             return result
 
     def plan(self, session_id: str) -> WarehouseGraphState:
+        """Plan assignments and final parking against projected state without committed movement."""
         return self._command(session_id, "plan")
 
     def execute(self, session_id: str) -> WarehouseGraphState:
+        """Review and execute an unconsumed delivery or parking-only schedule under the session guard."""
         return self._command(session_id, "execute")
 
     def _mutate(self, session_id: str, operation, *args) -> WarehouseGraphState:
+        """Apply one validated domain mutation and invalidate pending delivery and parking approvals."""
         with self._guard(session_id) as entry:
             state = self._read(entry.committed)[1]
             simulation = WarehouseSimulation(state.warehouse)

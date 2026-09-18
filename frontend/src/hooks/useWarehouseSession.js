@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 
+function proposalRevision(state) {
+  const parking = state.robot_schedules?.find(s => ['approved', 'stale'].includes(s.parking.status));
+  return state.delivery_plan || parking
+    ? state.batch_revision ?? state.delivery_plan?.warehouse_revision ?? parking.parking.plan.warehouse_revision
+    : null;
+}
+
 export function useWarehouseSession() {
   const [session, setSession] = useState(null);
   const [pendingAction, setPending] = useState('createSession');
@@ -45,10 +52,10 @@ export function useWarehouseSession() {
       if (action === 'plan' || action === 'execute') {
         setCommand({ action, outcome: result.outcome, error: result.error });
         setReplacement(action === 'execute' && result.outcome === 'ready' &&
-          result.state.execution_requested === false ? result.state.delivery_plan?.warehouse_revision ?? 0 : null);
+          result.state.execution_requested === false ? proposalRevision(result.state) : null);
       } else if (action !== 'refresh') {
         setCommand(null); setReplacement(null);
-      } else if (!result.state.delivery_plan || result.state.delivery_plan.warehouse_revision !== replacementNotice) {
+      } else if (proposalRevision(result.state) !== replacementNotice) {
         setReplacement(null);
       }
       if (action === 'reset' || action === 'createSession') setSelectedCell(null);
