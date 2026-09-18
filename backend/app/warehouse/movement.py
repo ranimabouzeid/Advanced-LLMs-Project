@@ -4,7 +4,7 @@ from pydantic import Field, model_validator
 
 from .models import DomainModel, Identifier, Position, WarehouseState
 from .simulation import WarehouseSimulation
-from .validation import validate_route
+from .validation import ValidationIssue, ValidationResult, validate_route
 
 
 class MovementPlan(DomainModel):
@@ -32,18 +32,39 @@ class MovementResult(DomainModel):
         return self
 
 
+def validate_parking_plan(warehouse: WarehouseState, plan: MovementPlan, *,
+                          expected_target=None, reserved_cells=()) -> ValidationResult:
+    """Inspect empty-robot departure without moving it; shared by Safety and execution."""
+    robot = next((r for r in warehouse.robots if r.id == plan.robot_id), None)
+    target = plan.route[-1]
+    checked = validate_route(warehouse, plan.robot_id,
+        robot.position if robot else plan.route[0], expected_target or target, plan.route)
+    reasons = list(checked.reasons)
+
+    def reject(code, message):
+        reasons.append(ValidationIssue(code=code, message=message))
+
+    if plan.warehouse_revision != warehouse.revision:
+        reject("stale_plan", "Parking revision does not match the current warehouse")
+    if robot is not None:
+        if robot.status != "idle" or robot.carried_package_id is not None:
+            reject("robot_status", "Parking requires an idle, empty robot")
+        if robot.battery < plan.total_steps:
+            reject("insufficient_battery", f"Parking requires {plan.total_steps} battery points; robot has {robot.battery}")
+    if (target not in warehouse.parking_cells or target in warehouse.dropoff_locations
+            or any(o.package.pickup == target for o in warehouse.orders)):
+        reject("parking_target", "Parking must end at designated staging, never pickup or drop-off")
+    if target in reserved_cells:
+        reject("parking_reserved", "Parking target is reserved by another robot")
+    return ValidationResult(route_valid=not reasons and not checked.conflicts,
+        collision_risk=checked.collision_risk, reasons=tuple(reasons), conflicts=checked.conflicts)
+
+
 def execute_parking(warehouse: WarehouseState, plan: MovementPlan) -> MovementResult:
     """Publish one revision on success; leave the delivered snapshot intact on failure."""
     try:
         robot = next(r for r in warehouse.robots if r.id == plan.robot_id)
-        target = plan.route[-1]
-        if (plan.warehouse_revision != warehouse.revision or robot.status != "idle"
-                or robot.carried_package_id is not None or robot.battery < plan.total_steps
-                or target not in warehouse.parking_cells or target in warehouse.blocked_cells
-                or target in warehouse.dropoff_locations
-                or any(o.package.pickup == target for o in warehouse.orders)):
-            raise ValueError("Invalid parking preconditions")
-        checked = validate_route(warehouse, robot.id, robot.position, target, plan.route)
+        checked = validate_parking_plan(warehouse, plan)
         if not checked.route_valid:
             raise ValueError("Invalid parking movement")
         simulation = WarehouseSimulation(warehouse)

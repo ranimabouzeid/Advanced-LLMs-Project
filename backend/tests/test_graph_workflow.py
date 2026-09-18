@@ -68,7 +68,7 @@ def test_normal_plan_all_updates_leave_warehouse_unchanged(initial):
 
 
 def test_route_unreachable_stops_once(initial):
-    result = run(initial, model=client(scripts={"LLMRoutePlan": [dict(robot_id="robot-1", order_id="o", outcome="unreachable", explanation="No route")] }))
+    result = run(initial, model=client(scripts={"RouteIntent": [dict(robot_id="robot-1", order_id="o", route_type="delivery", avoid_cells=[dict(x=2,y=0)], retry_feedback_acknowledged=True, explanation="Avoid pickup per context")] }))
     assert result.run_outcome == "unreachable"
     assert result.planned_deliveries[0].status == "unplannable"
     assert result.warehouse == initial.warehouse
@@ -98,7 +98,7 @@ def test_retry_failure_consumes_attempt(initial, failure):
                 raise RuntimeError("private")
             return super().grid_context(*args)
     tool = Tool()
-    result = run(state, route_tools=tool, model=client(scripts={"LLMRoutePlan": [dict(robot_id="robot-1", order_id="o", outcome="unreachable", explanation="No route")]}))
+    result = run(state, route_tools=tool, model=client(scripts={"RouteIntent": [dict(robot_id="robot-1", order_id="o", route_type="delivery", avoid_cells=[dict(x=2,y=0)], retry_feedback_acknowledged=True, explanation="Avoid pickup per context")]}))
     assert result.run_outcome == ("failed" if failure else "unreachable")
     assert result.replan_count == 1 and tool.calls == 1
     assert result.warehouse == state.warehouse and result.safety is None
@@ -163,10 +163,11 @@ def test_malformed_geometry_cannot_be_overridden(initial):
     records = [item.model_dump() for item in proposal.planned_deliveries]
     records[0]["delivery_plan"] = plan
     state = merge(proposal, {"command": "execute", "planned_deliveries": records})
-    graph = workflow.build_graph(client=client({"approved": True, "conflicts": [], "explanation": "Everything is safe"}))
+    graph = workflow.build_graph(client=client(scripts={"SafetyDecision": [{"approved": True, "conflicts": [], "explanation": "Everything is safe"}]}))
     result = WarehouseGraphState.model_validate(graph.invoke(state))
-    assert result.run_outcome == "failed" and result.planned_deliveries[0].safety.approved
-    assert result.replan_count == 0 and result.warehouse == state.warehouse
+    assert result.run_outcome == "ready" and not result.execution_requested
+    assert result.replan_count == 1 and result.warehouse == state.warehouse
+    assert any(a.node == "safety" and a.status == "rejected" for a in result.node_activity)
 
 
 @pytest.mark.parametrize("kind", ["tool", "model", "timeout", "malformed"])

@@ -1,8 +1,4 @@
-"""Offline model fixture. Any A*/validation here creates MOCK responses only.
-
-Production agents do not call these routines. Scripted responses can deliberately
-disagree with them, demonstrating that decisions come from the injected model.
-"""
+"""Offline structured decisions; trusted costs and findings come from production tools."""
 
 import json
 
@@ -11,12 +7,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
-from app.graph.state import FleetSelection, LLMRoutePlan, LLMMovementPlan, OrderSelection, SafetyDecision
-from app.warehouse import DeliveryPlan, WarehouseState, plan_delivery, validate_delivery_plan
-from app.warehouse.models import Robot, Position
-from app.warehouse.routing import astar_path
-from app.warehouse.validation import validate_route
-from app.warehouse.movement import MovementPlan
+from app.graph.state import FleetSelection, RouteIntent, OrderSelection, SafetyDecision
 
 
 class Fake(FakeMessagesListChatModel):
@@ -49,31 +40,13 @@ def automatic(schema, data):
         feasible = [c for c in data["candidates"] if c["feasible"]]
         chosen = min(feasible, key=lambda c: (c["total_cost"], c["robot"]["id"])) if feasible else None
         return schema(robot_id=chosen["robot"]["id"] if chosen else None, explanation="Mock minimum-cost choice" if chosen else "No feasible candidate: unavailable, unreachable or insufficient battery")
-    warehouse = WarehouseState.model_validate(data["warehouse"])
-    if schema is LLMMovementPlan:
-        robot = next(r for r in warehouse.robots if r.id == data["robot_id"])
-        route = astar_path(warehouse.width, warehouse.height, robot.position, Position.model_validate(data["target"]),
-            warehouse.obstacles, warehouse.blocked_cells | {r.position for r in warehouse.robots if r.id != robot.id})
-        return schema(robot_id=robot.id, route=route, explanation="Mock parking route")
-    if schema is SafetyDecision and "movement_plan" in data:
-        plan = MovementPlan.model_validate(data["movement_plan"])
-        robot = next(r for r in warehouse.robots if r.id == plan.robot_id)
-        valid = validate_route(warehouse, robot.id, robot.position, plan.route[-1], plan.route).route_valid
-        valid = valid and robot.battery >= plan.total_steps
-        return schema(approved=valid, conflicts=[] if valid else ["Parking route invalid"], explanation="Mock parking check")
-    order_id = data["selected_order"]["id"]
-    robot_id = data["selected_robot"]["id"]
-    if schema is LLMRoutePlan:
-        plan = plan_delivery(warehouse, order_id, robot_id)
-        return schema(order_id=order_id, robot_id=robot_id,
-                      outcome="planned" if plan else "unreachable",
-                      route_to_pickup=plan.pickup_route if plan else None,
-                      route_to_dropoff=plan.delivery_route if plan else None,
-                      explanation="Mock route coordinates" if plan else "Mock reports unreachable")
+    if schema is RouteIntent:
+        return schema(**data["expected_intent"],
+                      retry_feedback_acknowledged=bool(data.get("safety_feedback")),
+                      explanation="Mock intent uses trusted endpoints and acknowledges supplied feedback")
     if schema is SafetyDecision:
-        result = validate_delivery_plan(warehouse, DeliveryPlan.model_validate(data["delivery_plan"]))
-        conflicts = tuple(issue.message for issue in result.reasons) + tuple(
-            f"Occupied by {item.robot_id}" for item in result.conflicts)
-        return schema(approved=result.route_valid, conflicts=conflicts,
-                      explanation="Mock approves" if result.route_valid else "Mock rejects; revise the route")
+        facts = data["trusted_findings"]
+        approved = facts["route_valid"]
+        return schema(approved=approved, conflicts=[] if approved else ["Correct the trusted hard findings"],
+                      explanation="Mock interprets trusted findings")
     raise AssertionError(f"Unexpected schema: {schema}")

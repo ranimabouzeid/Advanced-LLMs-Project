@@ -405,3 +405,10 @@ empty-robot movement atomically through WarehouseSimulation, charging one batter
 point per step and publishing one revision on success. On rejection it returns no
 partial snapshot; the earlier delivered package remains delivered. A failed final
 departure stops dependent work and can be retried through a new Plan/Execute.
+
+
+Hybrid routing/safety reuse the existing domain A* and delivery validation.
+`validate_parking_plan` provides read-only geometry, battery, status, revision,
+staging and reservation findings, shared by the Safety role and parking executor.
+The graph still calls Groq for routing intent and Safety interpretation; hard
+failures cannot be overridden by model approval.

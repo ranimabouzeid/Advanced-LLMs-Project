@@ -49,7 +49,7 @@ def test_single_delivery_has_one_final_parking_route_and_full_battery_accounting
     assert schedule.parking.plan.route[-1] == state.warehouse.parking_cells[0]
     assert schedule.projected_robot.battery == 100 - record.delivery_plan.total_steps - schedule.parking.plan.total_steps
     assert schedule.projected_robot.position == schedule.parking.plan.route[-1]
-    assert sum(schema.__name__ == "LLMMovementPlan" for schema, _, _ in model.calls) == 1
+    assert sum(schema.__name__ == "RouteIntent" and data["expected_intent"]["route_type"] == "parking" for schema, data, _ in model.calls) == 1
     result = execute(ready, model)
     assert result.run_outcome == "delivered"
     assert result.robot_schedules[0].parking.status == "completed"
@@ -80,7 +80,7 @@ def test_r1_r2_r1_assignments_chain_without_intermediate_parking():
     assert finalized[1]["schedule_context"]["next_order_id"] is None
     assert finalized[1]["schedule_context"]["departure"] == "parking/staging"
     # One movement to parking per robot, after all its own assigned deliveries.
-    assert sum(schema.__name__ == "LLMMovementPlan" for schema, _, _ in model.calls) == 2
+    assert sum(schema.__name__ == "RouteIntent" and data["expected_intent"]["route_type"] == "parking" for schema, data, _ in model.calls) == 2
     result = execute(ready, model)
     assert result.run_outcome == "delivered"
     assert all(o.status == "delivered" for o in result.warehouse.orders)
@@ -236,18 +236,13 @@ def test_atomic_parking_integrity_rejection_preserves_delivered_snapshot(bad):
 @pytest.mark.parametrize("budget", [0, 1, 2, 3])
 def test_parking_safety_retries_are_bounded_and_receive_feedback(budget):
     state, model = scenario(("robot-1",))
-    ready = run(state, model)
-    original = ready.robot_schedules[0].parking.plan.route
-    routes = [dict(robot_id="robot-1", explanation="Revised departure",
-                   route=([p(9, 0), *([p(8, 0), p(9, 0)] * attempt), *original[1:]]))
-              for attempt in range(budget + 1)]
     yes = dict(approved=True, conflicts=[], explanation="Approved")
     no = dict(approved=False, conflicts=["Revise departure"], explanation="Try another path")
     model = client(scripts={"FleetSelection": [dict(robot_id="robot-1", explanation="Chosen")],
-                            "LLMMovementPlan": routes, "SafetyDecision": [yes, yes] + [no] * (budget + 1)})
+                            "SafetyDecision": [yes, yes] + [no] * (budget + 1)})
     state = WarehouseGraphState.model_validate({**state.model_dump(), "max_replans": budget})
     result = run(state, model)
-    calls = [data for schema, data, _ in model.calls if schema.__name__ == "LLMMovementPlan"]
+    calls = [data for schema, data, _ in model.calls if schema.__name__ == "RouteIntent" and data["expected_intent"]["route_type"] == "parking"]
     assert len(calls) == budget + 1 and result.replan_count == budget
     assert result.run_outcome == "failed" and result.warehouse == state.warehouse
     for data in calls[1:]:
@@ -267,17 +262,18 @@ def test_parking_rejection_on_execute_returns_review_only_replacement():
     assert execute(replacement, model).run_outcome == "delivered"
 
 
-def test_incorrect_llm_parking_approval_cannot_bypass_execution_checks():
+def test_incorrect_llm_parking_approval_cannot_bypass_hard_checks():
+    from app.graph.agents import parking_safety
     state, model = scenario(("robot-1",))
-    model.scripts["LLMMovementPlan"] = [dict(robot_id="robot-1", route=[p(9, 0), p(7, 9)],
-                                            explanation="Model proposes a jump")]
-    model.scripts["SafetyDecision"] = [dict(approved=True, conflicts=[], explanation="Model approves")] * 5
     ready = run(state, model)
-    assert ready.run_outcome == "ready"
-    result = execute(ready, model)
-    assert result.run_outcome == "partial" and result.warehouse.orders[0].status == "delivered"
-    assert result.warehouse.robots[0].position == p(9, 0)
-    assert result.robot_schedules[0].parking.status == "failed"
+    simulation = WarehouseSimulation(state.warehouse)
+    assert simulation.execute_delivery(ready.planned_deliveries[0].delivery_plan).success
+    bad = MovementPlan(robot_id="robot-1", route=[p(9, 0), p(7, 9)],
+                       warehouse_revision=simulation.state.revision)
+    model = client(dict(approved=True, conflicts=[], explanation="Approve the jump"))
+    decision = parking_safety(simulation.state, bad, client=model)
+    assert not decision.approved and any("non_adjacent" in c for c in decision.conflicts)
+    assert model.calls[0][1]["trusted_findings"]["route_valid"] is False
 
 
 def test_delivery_only_preview_cannot_execute_without_departure_schedule():
@@ -290,3 +286,27 @@ def test_delivery_only_preview_cannot_execute_without_departure_schedule():
     assert update["run_outcome"] == "failed" and "warehouse" not in update
     result = execute(preview, model)
     assert result.run_outcome == "failed" and result.warehouse == state.warehouse
+
+
+@pytest.mark.parametrize("rejected_stage", ["delivery", "parking"])
+def test_checkpointed_replacement_preserves_feedback_and_requires_explicit_execute(rejected_stage):
+    state, model = scenario(("robot-1",))
+    coordinator = SessionCoordinator(client=model)
+    sid = seed_session(coordinator, state)
+    ready = coordinator.plan(sid)
+    yes = dict(approved=True, conflicts=[], explanation="Approved")
+    no = dict(approved=False, conflicts=["Review the departure corridor"], explanation="Reconsider routing intent")
+    model.scripts["SafetyDecision"] = [no] if rejected_stage == "delivery" else [yes, no]
+    previous_calls = len(model.calls)
+    replacement = coordinator.execute(sid)
+    assert replacement.run_outcome == "ready" and not replacement.execution_requested
+    assert replacement.warehouse == ready.warehouse and replacement.replan_count == 1
+    assert coordinator.get_state(sid) == replacement
+    retry_calls = [data for schema, data, _ in model.calls[previous_calls:]
+                   if schema.__name__ == "RouteIntent" and data.get("safety_feedback")]
+    assert retry_calls and all(data["safety_feedback"] == no for data in retry_calls)
+    assert all(data["previous_route"] is not None for data in retry_calls)
+    assert replacement.route_retry_feedback == ()
+    completed = coordinator.execute(sid)
+    assert completed.run_outcome == "delivered"
+    assert completed.warehouse.robots[0].position in completed.warehouse.parking_cells

@@ -32,14 +32,29 @@ class OrderSelection(WorkflowModel):
 
 
 class FleetSelection(WorkflowModel):
-    """A fresh Fleet LLM choice among feasible minimum-total-A*cost candidates."""
+    """A fresh Fleet LLM choice among feasible candidates with minimum total A* cost."""
 
     robot_id: Identifier | None = Field(description="ID of a supplied feasible minimum-total-cost robot; null only if none is feasible. Use exact A* costs, never estimated distances. Previous assignments create no preference.")
     explanation: ShortText = Field(description="Why this robot has minimum supplied A* total cost given its actual projected position, battery, workload and availability; explain any choice among tied minima.")
 
 
+class RouteIntent(WorkflowModel):
+    """Groq routing intent and additional constraints; A* computes every path coordinate.
+
+    Trusted context owns endpoints and assignments. Delivery includes pickup and
+    drop-off; continuation starts at a prior drop-off; parking follows final work.
+    """
+
+    robot_id: Identifier = Field(description="Supplied robot identifier; routing intent cannot change the assignment.")
+    order_id: Identifier | None = Field(description="Supplied order identifier for delivery/continuation, or null for final parking.")
+    route_type: Literal["delivery", "continuation", "parking"] = Field(description="Match the supplied objective: robot to pickup then drop-off, prior drop-off to next pickup then drop-off, or final drop-off to parking.")
+    avoid_cells: tuple[Position, ...] = Field(default=(), max_length=100, description="Additional in-bounds cells A* must avoid, motivated by context or retry feedback; never a coordinate path. Empty uses only trusted constraints.")
+    retry_feedback_acknowledged: bool = Field(default=False, strict=True, description="Must be true on a Safety rejection retry; explanation must address the supplied findings and corrective intent.")
+    explanation: ShortText = Field(description="Explain the routing objective and any additional constraints or retry response; do not calculate or invent path coordinates.")
+
+
 class LLMRoutePlan(WorkflowModel):
-    """LLM-generated pickup and delivery legs for one assignment, excluding final parking/staging.
+    """Structured deterministic pickup and delivery legs, excluding final parking/staging.
 
     The drop-off is a temporary service cell: the package remains delivered there,
     while the robot continues to its next pickup or a separately planned parking cell.
@@ -64,13 +79,14 @@ class LLMRoutePlan(WorkflowModel):
 
 
 class SafetyDecision(WorkflowModel):
-    """LLM assessment of the currently supplied route and context, with actionable retry feedback.
+    """LLM interpretation of trusted deterministic findings for the currently supplied route.
 
     Approval applies only to this delivery or parking/staging movement;
-    deterministic execution still protects state integrity.
+    Hard deterministic failures cannot be overridden by the LLM; execution also
+    protects state integrity. Rejections provide actionable Route retry feedback.
     """
 
-    approved: bool = Field(strict=True, description="True only if this supplied route is approved in its current context; does not approve other routes or execute movement.")
+    approved: bool = Field(strict=True, description="True only if trusted hard checks pass and the LLM approves this supplied route; hard failures require false. Does not approve other routes or execute movement.")
     conflicts: tuple[ShortText, ...] = Field(default=(), max_length=100,
         description="Specific rejection findings: identify the leg, cell or robot and needed correction where applicable. Must be empty when approved.")
     explanation: ShortText = Field(description="Reason for the decision; when rejected, give specific feedback Route can use to produce a corrected route.")
@@ -79,6 +95,24 @@ class SafetyDecision(WorkflowModel):
     def consistent_decision(self) -> Self:
         if self.approved and self.conflicts:
             raise ValueError("Approval cannot also report conflicts")
+        return self
+
+
+class RouteRetryFeedback(WorkflowModel):
+    """Rejected proposal and feedback retained only while rebuilding a schedule."""
+
+    robot_id: Identifier = Field(description="Robot whose rejected route supplied this feedback.")
+    order_id: Identifier | None = Field(description="Rejected delivery order, or null for parking movement.")
+    previous_route: DeliveryPlan | MovementPlan = Field(description="Rejected coordinates provided as feedback only; never reused as executable fallback.")
+    safety: SafetyDecision = Field(description="Enforced rejection with trusted failures and the LLM explanation.")
+
+    @model_validator(mode="after")
+    def rejected_identity(self) -> Self:
+        if self.safety.approved or self.previous_route.robot_id != self.robot_id:
+            raise ValueError("Retry feedback requires a rejected route for this robot")
+        expected_order = self.previous_route.order_id if isinstance(self.previous_route, DeliveryPlan) else None
+        if self.order_id != expected_order:
+            raise ValueError("Retry feedback order must match its route")
         return self
 
 
@@ -100,7 +134,7 @@ class PlannedDelivery(WorkflowModel):
     order_id: Identifier = Field(description="Order ID uniquely identifying this batch assignment.")
     selection: OrderSelection | None = Field(default=None, description="Order LLM selection that produced this assignment.")
     robot_id: Identifier | None = Field(default=None, description="Robot selected by a fresh Fleet decision, or null when no assignment is available.")
-    delivery_plan: DeliveryPlan | None = Field(default=None, description="Model-authored pickup and delivery routes; excludes final parking/staging.")
+    delivery_plan: DeliveryPlan | None = Field(default=None, description="A*-generated pickup and delivery routes after Groq intent; excludes final parking/staging.")
     safety: SafetyDecision | None = Field(default=None, description="Safety assessment for this delivery; null means unchecked.")
     status: Literal["approved", "unplannable", "stale", "delivered", "failed", "not_executed"] = Field(description="Planning or execution result for the package delivery, independent of final parking status.")
     reason: ShortText | None = Field(default=None, description="Reason this assignment is stale, unplannable, failed or not executed.")
@@ -133,7 +167,7 @@ class RobotForecast(WorkflowModel):
 
 
 class LLMMovementPlan(WorkflowModel):
-    """LLM-generated final departure to parking/staging when no assigned order remains.
+    """Structured deterministic final departure to parking/staging when no assigned order remains.
 
     The delivered package stays at the drop-off while the empty robot leaves.
     Continuation to another pickup belongs to that assignment, not this result.
@@ -185,7 +219,7 @@ class WarehouseGraphState(WorkflowModel):
 
     warehouse.revision is the only current revision. A plan's revision describes
     its historical input snapshot. None safety means unchecked, never approval.
-    Safety stores the model's explicit decision. The execution simulator retains
+    Safety stores the model decision constrained by deterministic hard findings. The execution simulator retains
     its own deterministic data-integrity and atomic-movement checks.
     """
 
@@ -210,6 +244,7 @@ class WarehouseGraphState(WorkflowModel):
     planning_index: int = Field(default=0, ge=0, strict=True)
     robot_forecasts: tuple[RobotForecast, ...] = Field(default=(), description="Independent planning-only timelines supplied to each fresh Fleet decision; cleared after finalization.")
     robot_schedules: tuple[RobotSchedule, ...] = Field(default=(), description="Finalized sequential robot schedules, each ending at a distinct parking/staging cell after its last assignment.")
+    route_retry_feedback: tuple[RouteRetryFeedback, ...] = Field(default=(), description="Planning-only rejected routes and Safety feedback retained during bounded replacement planning; never executable proposals.")
 
     @property
     def warehouse_revision(self) -> int:

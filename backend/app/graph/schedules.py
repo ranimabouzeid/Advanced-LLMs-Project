@@ -2,7 +2,7 @@
 
 from . import batch
 from .agents import route_agent, safety_agent, parking_route, parking_safety
-from .state import NodeActivity, PlannedDelivery, PlannedParking, RobotSchedule, WarehouseGraphState
+from .state import NodeActivity, PlannedDelivery, PlannedParking, RobotSchedule, RouteRetryFeedback, WarehouseGraphState
 from app.warehouse.models import WarehouseState
 from app.warehouse.movement import execute_parking
 
@@ -55,6 +55,7 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
                            "next_order_id": next_item.order_id if next_item else None,
                            "departure": "next_pickup" if next_item else "parking/staging"}
                 local = WarehouseGraphState(warehouse=warehouse, command="plan",
+                    route_retry_feedback=state.route_retry_feedback,
                     order_selection=item.selection, selected_robot_id=robot_id,
                     node_activity=activity, replan_count=count, max_replans=state.max_replans)
                 while True:
@@ -82,10 +83,15 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
             if target is None:
                 raise ScheduleUnavailable("No free parking cell; schedule cannot be finalized")
             previous = feedback = None
+            inherited = next((item for item in reversed(state.route_retry_feedback)
+                              if item.robot_id == robot_id and item.order_id is None), None)
+            if inherited:
+                previous, feedback = inherited.previous_route, inherited.safety
             while True:
-                plan = parking_route(warehouse, robot_id, target, client=client, previous=previous, feedback=feedback)
+                plan = parking_route(warehouse, robot_id, target, client=client, previous=previous, feedback=feedback, tools=route_tools)
                 activity = (*activity, NodeActivity(node="route", status="completed", message="Final parking route proposed"))
-                feedback = parking_safety(warehouse, plan, client=client)
+                feedback = parking_safety(warehouse, plan, client=client, tools=safety_tools,
+                                          expected_target=target, reserved_cells=reserved)
                 activity = (*activity, NodeActivity(node="safety", status="completed" if feedback.approved else "rejected",
                                                     message=feedback.explanation))
                 if feedback.approved:
@@ -105,6 +111,7 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
         records = tuple(PlannedDelivery.model_validate({**item.model_dump(), "status": "unplannable", "reason": reason})
                         if item.status == "approved" else item for item in state.planned_deliveries)
         return dict(planned_deliveries=records, robot_schedules=(), robot_forecasts=(),
+            route_retry_feedback=(),
             projected_warehouse=None, planning_queue=(), planning_index=0,
             order_selection=None, selected_robot_id=None, delivery_plan=None, safety=None,
             execution_requested=False, planning_outcome="failed", run_outcome="failed",
@@ -128,9 +135,12 @@ def review(state, *, client, safety_tools=None):
     records, schedules = [], []
     by_id = {item.order_id: item for item in state.planned_deliveries}
 
-    def rejected(message):
+    def rejected(message, plan, decision):
         """Request bounded replacement planning with execution intent revoked."""
         return dict(run_outcome="failed", execution_requested=False, planning_outcome="stale",
+                    route_retry_feedback=(*state.route_retry_feedback, RouteRetryFeedback(
+                        robot_id=plan.robot_id, order_id=getattr(plan, "order_id", None),
+                        previous_route=plan, safety=decision)),
                     error_message=message, node_activity=activity, safety=None)
 
     try:
@@ -149,16 +159,16 @@ def review(state, *, client, safety_tools=None):
                 if activity[-1].status == "failed":
                     return {**update, "node_activity": activity}
                 if item.delivery_plan.warehouse_revision != warehouse.revision or not update["safety"].approved:
-                    return rejected("Delivery requires a new schedule and review")
+                    return rejected("Delivery requires a new schedule and review", item.delivery_plan, update["safety"])
                 records.append(PlannedDelivery.model_validate({**item.model_dump(), "safety": update["safety"],
                                                                "status": "approved", "reason": None}))
                 warehouse = batch.project(warehouse, item.delivery_plan)
             parking = schedule.parking
-            decision = parking_safety(warehouse, parking.plan, client=client)
+            decision = parking_safety(warehouse, parking.plan, client=client, tools=safety_tools)
             activity = (*activity, NodeActivity(node="safety", status="completed" if decision.approved else "rejected",
                                                 message=decision.explanation))
             if parking.plan.warehouse_revision != warehouse.revision or not decision.approved:
-                return rejected("Parking requires a new schedule and review")
+                return rejected("Parking requires a new schedule and review", parking.plan, decision)
             warehouse = project_parking(warehouse, parking.plan)
             schedules.append(RobotSchedule.model_validate({**schedule.model_dump(),
                 "parking": {**parking.model_dump(), "safety": decision, "status": "approved", "reason": None}}))

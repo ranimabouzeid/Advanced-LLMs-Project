@@ -151,22 +151,22 @@ def test_plan_no_work(http):
     assert result["outcome"] == "no_work" and result["error"] is None
 
 
-def test_plan_reports_route_model_unreachable(http):
+def test_plan_reports_fleet_candidates_unreachable(http):
     sid = prepared(http)
     assert http.post(f"{ROOT}/{sid}/blocked-cells", json=ORDER["pickup"]).status_code == 200
     result = command(http, sid, "plan")
     assert result["outcome"] == "unreachable"
-    assert [item["node"] for item in result["state"]["node_activity"]] == ["order", "fleet", "route"]
+    assert [item["node"] for item in result["state"]["node_activity"]] == ["order", "fleet"]
 
 
-def test_route_unreachable_during_stale_execute(http):
+def test_fleet_candidates_unreachable_during_stale_execute(http):
     sid = prepared(http)
     command(http, sid, "plan")
     changed = http.post(f"{ROOT}/{sid}/blocked-cells", json=ORDER["pickup"]).json()["state"]
     result = command(http, sid, "execute")
     assert result["outcome"] == "unreachable"
     assert result["state"]["warehouse"] == changed["warehouse"]
-    assert result["state"]["node_activity"][-1]["node"] == "route"
+    assert result["state"]["node_activity"][-1]["node"] == "fleet"
 
 
 def test_stale_execute_returns_review_only_then_explicit_delivery(http):

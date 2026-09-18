@@ -1,8 +1,10 @@
-"""Role context and trusted Fleet A* costs; no Route geometry or Safety decisions."""
+"""Trusted role context, Fleet costs, Route A* planning and hard Safety findings."""
 
 from pydantic import BaseModel, ConfigDict, Field
-from app.warehouse.models import Identifier, Order, OrderStatus, Robot, WarehouseState
+from app.warehouse.models import DeliveryPlan, Identifier, Order, OrderStatus, Robot, WarehouseState
 from app.warehouse.routing import astar_path
+from app.warehouse.validation import validate_delivery_plan
+from app.warehouse.movement import MovementPlan, validate_parking_plan
 
 
 class FleetCandidate(BaseModel):
@@ -90,7 +92,31 @@ class FleetTools:
 
 
 class RouteTools:
-    """Retrieve grid and endpoint context without computing a route."""
+    """Provide trusted endpoints and deterministic A* paths after LLM intent."""
+
+    def _path(self, warehouse, robot_id, start, target, avoid_cells):
+        if any(not warehouse.contains(cell) for cell in avoid_cells):
+            raise ValueError("Avoid cells must be inside the grid")
+        blocked = warehouse.blocked_cells | set(avoid_cells) | {
+            robot.position for robot in warehouse.robots if robot.id != robot_id}
+        return astar_path(warehouse.width, warehouse.height, start, target, warehouse.obstacles, blocked)
+
+    def plan_delivery(self, warehouse, order_id, robot_id, avoid_cells=()):
+        """Generate shortest endpoint-inclusive legs without executing movement."""
+        order, robot = _order(warehouse, order_id), _robot(warehouse, robot_id)
+        pickup = self._path(warehouse, robot_id, robot.position, order.package.pickup, avoid_cells)
+        delivery = self._path(warehouse, robot_id, order.package.pickup, order.dropoff, avoid_cells)
+        if pickup is None or delivery is None:
+            return None
+        return DeliveryPlan(robot_id=robot_id, order_id=order_id, pickup_route=pickup,
+            delivery_route=delivery, total_steps=len(pickup) + len(delivery) - 2,
+            warehouse_revision=warehouse.revision)
+
+    def plan_parking(self, warehouse, robot_id, target, avoid_cells=()):
+        """Generate shortest final departure to the trusted reserved target."""
+        path = self._path(warehouse, robot_id, _robot(warehouse, robot_id).position, target, avoid_cells)
+        return None if path is None else MovementPlan(robot_id=robot_id, route=path, warehouse_revision=warehouse.revision)
+
     def grid_context(self, warehouse: WarehouseState, order_id: Identifier, robot_id: Identifier) -> dict:
         """Describe the selected robot, pickup, drop-off and occupied cells for LLM routing."""
         return {"warehouse": warehouse.model_dump(mode="json"),
@@ -101,7 +127,15 @@ class RouteTools:
 
 
 class SafetyTools:
-    """Retrieve trusted context without making an approval decision."""
+    """Inspect hard constraints without executing movement; LLM may add rejection."""
+
+    def inspect_delivery(self, warehouse, plan):
+        return validate_delivery_plan(warehouse, plan)
+
+    def inspect_parking(self, warehouse, plan, *, expected_target=None, reserved_cells=()):
+        return validate_parking_plan(warehouse, plan, expected_target=expected_target,
+                                     reserved_cells=reserved_cells)
+
     def current_context(self, warehouse: WarehouseState, order_id: Identifier, robot_id: Identifier) -> dict:
         """Describe the supplied snapshot for the Safety LLM, without validating movement."""
         return {"warehouse": warehouse.model_dump(mode="json"),

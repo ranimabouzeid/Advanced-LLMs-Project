@@ -670,8 +670,91 @@ React or Milestone G functionality was added.
 This section supersedes the historical milestone descriptions above. All four
 agents use one injected ChatGroq client through create_model_client,
 SessionCoordinator and build_graph. Each call uses structured_output with
-function_calling and a Pydantic result. Tools retrieve trusted context; Fleet
-ranking, route generation and Safety approval remain LLM decisions.
+function_calling and a Pydantic result. Fleet uses trusted A* costs and validates
+minimum-cost eligibility. Route uses Groq intent followed by A* geometry, and
+Safety interprets deterministic findings with a hard rejection guard. Order selection
+remains LLM-based.
+
+### Hybrid Fleet: trusted costs and constrained Groq selection
+
+Every order triggers fresh candidate evaluation for every robot. For each idle,
+empty robot, FleetTools runs the existing deterministic A* twice: projected robot
+position to pickup, and pickup to drop-off. Each cost is path length minus one;
+total_cost is their sum. Shelves, temporary blocks and other robots' occupancy
+are respected. Unavailable/unreachable robots have null costs where applicable;
+robots whose projected battery cannot cover the total are infeasible. The table
+includes all robot records, both leg costs, total cost, feasibility and reasons.
+The prompt also includes each robot's ordered assignment IDs as workload context.
+No previous assignment or shared drop-off receives any preference.
+
+Within a batch, each robot's active chain is costed from its last projected
+drop-off with prior delivery energy deducted. Other independent forecast tails
+are not treated as simultaneous occupancy; cost calculation uses the same view
+as the existing Route preview: this robot advances while other robots occupy
+committed cells. Finalization resolves physical schedule occupancy separately.
+After a completed batch, the next Plan initializes forecasts from committed parked
+positions and remaining batteries, including the previous parking movement cost.
+There is no parking between orders in the same chain.
+
+The shared Groq client still returns FleetSelection. It receives exact candidate
+costs and the minimum feasible cost/IDs, and must not estimate distances. Any tied
+minimum may be selected. Null is accepted only if no feasible candidate exists.
+Unknown, unavailable, battery-infeasible, non-minimum and unjustified null choices
+receive one corrective retry with the same candidate table and explicit feedback.
+A second invalid choice fails the command; no robot is silently substituted.
+Provider or malformed-schema failures terminate without this semantic retry.
+The two-call Fleet bound is local and separate from the existing Route retry budget.
+
+When no eligible route is reachable, Fleet reports unreachable before Route is
+called; unavailable or battery-infeasible resources report no_robot. Order, Route
+and Safety still call Groq. Fleet cost coordinates are discarded; Route runs its own
+A* planning after the routing-intent call.
+The minimum guarantee applies to the trusted per-order candidate table, not to
+final route length under additional intent constraints or a globally optimized schedule.
+Final parking feasibility remains checked during schedule finalization.
+
+### Hybrid Route and Safety
+
+Route receives the trusted robot/order endpoints, grid, current/projected state,
+schedule context, previous rejected route and Safety feedback. Groq returns
+RouteIntent: matching robot/order IDs and route_type (delivery, continuation or
+parking), additional in-bounds avoid_cells, a strict retry acknowledgement and an
+explanation. The model cannot return path arrays or change the selected assignment.
+Malformed/provider output fails without a deterministic-only fallback.
+
+After valid intent, RouteTools calls the domain astar_path for each leg, with
+shelves, blocked cells, other robot occupancy and the intent's extra avoid cells.
+Paths include endpoints and use orthogonal unit-cost steps. A* is shortest under
+these constraints; it never trusts model distance estimates. DeliveryPlan and
+MovementPlan remain the public coordinate records. Unreachable delivery legs
+return unreachable; an unreachable final parking leg prevents READY publication.
+A one-cell start-equals-goal route remains valid.
+
+SafetyTools reuses validate_delivery_plan for delivery/continuation and
+validate_parking_plan for departure. The latter is also used by execute_parking,
+so inspection and execution share parking preconditions. Checks include bounds,
+adjacency, endpoints, obstacles, blocked/occupied cells, statuses, battery, revision,
+designated staging, and reservations. Sequential schedule projection provides the
+occupancy for shared drop-offs; state validation enforces schedule references and
+unique parking reservations. Each subsequent pickup/departure is inspected separately.
+
+The complete ValidationResult is sent to Groq as trusted_findings. SafetyDecision
+retains approved/conflicts/explanation. When hard checks pass, the model may still
+reject for contextual reasons. When any hard check fails, the final decision is
+always rejected, even if Groq says approved: conflicts include deterministic codes,
+legs, cells and robot IDs, and the explanation explicitly records enforcement.
+Feedback keeps up to 100 conflict messages of 300 characters; full findings go to
+the Safety LLM. No safety inspection executes movement.
+
+RouteRetryFeedback preserves rejected delivery/parking proposals through both
+local retries and Execute-triggered full schedule replacements. It is checkpoint
+serializable, matched to robot/order identity, and supplied during Route preview
+and finalization. It is cleared on fresh Plan, completed planning, failure or
+warehouse invalidation. Retry intent must acknowledge the rejection; added avoid
+constraints can choose another corridor, while A* always regenerates coordinates.
+The global 0-3 Route retry budget and explicit Execute boundary remain unchanged.
+Repeated subjective rejection can exhaust the budget even with a valid shortest
+path. No previous proposal is used as a fallback and no replacement auto-executes.
 
 ### Service cells and parking/staging
 
@@ -692,7 +775,8 @@ cell cannot be blocked by a warehouse mutation.
 ### Two planning stages
 
 1. **Assignment previews:** Order selects remaining work; Fleet makes a fresh LLM
-   decision with every robot's projected position, battery, workload and availability.
+   decision constrained to minimum-cost feasible candidates, using every robot's
+   projected position, battery, workload and availability.
    Route and Safety produce and assess that assignment's preview. RobotForecast
    advances only the chosen robot's timeline, subtracting delivery steps and
    temporarily ending at its drop-off. No parking cost is assumed yet. These
@@ -702,7 +786,8 @@ cell cannot be blocked by a warehouse mutation.
    each robot's own assignment order. Route and Safety are called again against
    sequential projected occupancy. Each next pickup route begins at the previous
    drop-off. After the robot's last delivery, deterministic allocation reserves a
-   free staging cell; the Route LLM authors the departure and Safety reviews it.
+   free staging cell; Route obtains Groq intent and plans the A* departure, then
+   Safety inspects it and calls Groq before enforcing hard findings.
    Projection subtracts parking steps, advances revision and exposes the robot's
    final position/battery at staging before the next robot's schedule is planned.
 
@@ -718,18 +803,20 @@ cell are scheduled for parking recovery before new delivery groups.
 | Model | Meaning |
 | --- | --- |
 | OrderSelection | One eligible pending order and selection reason |
-| FleetSelection | Fresh robot choice from projected state, or null when unsuitable |
-| LLMRoutePlan | Robot-to-pickup/continuation leg and pickup-to-drop-off delivery leg |
-| LLMMovementPlan | Final empty-robot route to reserved parking/staging |
-| SafetyDecision | Assessment of only the supplied delivery or parking route, with retry feedback |
+| FleetSelection | Groq choice among feasible minimum-A*cost robots, or null when none is feasible |
+| RouteIntent | Groq objective and extra avoid-cell constraints; no path coordinates |
+| LLMRoutePlan | Retained coordinate-result schema; actual plans use DeliveryPlan, never Groq coordinates |
+| LLMMovementPlan | Retained coordinate-result schema; actual parking uses MovementPlan |
+| SafetyDecision | LLM interpretation of trusted findings; hard failures force rejection |
+| RouteRetryFeedback | Rejected route and enforced decision retained temporarily through replacement planning |
 | RobotForecast | Independent planning-only robot state and ordered assignment IDs, before parking |
 | PlannedDelivery | Canonical assignment, delivery route, approval and delivery outcome |
 | PlannedParking | Final departure, approval and separate parking outcome |
 | RobotSchedule | Ordered references to that robot's assignments, one parking leg and final projected robot |
 
 Model docstrings explain the whole result; Field descriptions define individual
-values; prompts specify role behavior. Validation enforces format and references,
-not a deterministic substitute for LLM decisions. JSON Schema and Groq-compatible
+values; prompts specify role behavior. Pydantic enforces format and references;
+Fleet additionally enforces its trusted minimum-cost selection rule. JSON Schema and Groq-compatible
 tool conversion tests verify exported descriptions. Route/Safety context identifies
 assignment previews, finalization or Execute review and the next departure type.
 A delivery approval does not implicitly approve a subsequent pickup or parking leg.
@@ -744,7 +831,9 @@ batch. Parking-only recovery can be READY with no delivery_plan.
 ### Retries and execution
 
 Safety rejection passes the previous route and specific feedback to Route with a
-shared max_replans budget of 0-3. Repeating identical rejected coordinates fails.
+shared max_replans budget of 0-3. Every retry requires a new Groq intent that
+acknowledges feedback and a fresh A* call. Identical shortest coordinates may
+result for unchanged constraints, but the previous route is never reused.
 Finalization must complete before a schedule is executable: delivery-only previews
 are rejected. Provider/schema errors never authorize movement. An explicit Plan
 starts a fresh retry budget.
@@ -771,8 +860,9 @@ external robot side effects.
 
 SessionCoordinator retains one saver, per-session guards, and private committed
 checkpoint references. Serializer allowlists include the forecast/schedule and
-movement types. No real Groq calls occur in pytest. A* remains a standalone domain
-utility and is not used for agent decisions.
+movement types. No real Groq calls occur in pytest. The domain A* utility supplies
+Fleet candidate costs and Route geometry; deterministic validation supplies
+trusted Safety facts. All four roles continue to call the injected Groq client.
 
 ### Frontend and limits
 

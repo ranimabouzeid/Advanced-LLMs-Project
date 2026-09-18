@@ -25,7 +25,7 @@ def after_order(state: WarehouseGraphState) -> str:
 
 def after_fleet(state: WarehouseGraphState) -> str:
     """Plan the chosen robot route or record an assignment with no suitable robot."""
-    if state.run_outcome == "no_robot":
+    if state.run_outcome in ("no_robot", "unreachable"):
         return "collect"
     return "route" if state.run_outcome == "running" else "failure"
 

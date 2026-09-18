@@ -36,28 +36,21 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
     responses = []
     for index, robot_id in enumerate(("robot-1", second_robot)):
         order = orders[index]
-        start = p(0, 0) if index == 0 else p(0, 8) if robot_id == "robot-3" else p(4, 0)
-        pickup = [p(x, start.y).model_dump() for x in range(start.x, order.package.pickup.x + 1)]
-        delivery = [p(x, start.y).model_dump() for x in range(order.package.pickup.x, order.dropoff.x + 1)]
         responses.extend([
             ("OrderSelection", dict(order_id=order.id, explanation="Scripted order")),
             ("FleetSelection", dict(robot_id=robot_id, explanation="Fresh scripted Fleet decision")),
-            ("LLMRoutePlan", dict(order_id=order.id, robot_id=robot_id,
-                                 route_to_pickup=pickup, route_to_dropoff=delivery,
-                                 explanation="Scripted coordinates")),
+            ("RouteIntent", dict(order_id=order.id, robot_id=robot_id,
+                                 route_type="continuation" if index and robot_id == "robot-1" else "delivery",
+                                 explanation="Scripted routing intent")),
             ("SafetyDecision", dict(approved=True, conflicts=[], explanation="Scripted approval")),
         ])
     initial_responses = list(responses)
     groups = [("robot-1", [0, 1])] if second_robot == "robot-1" else [("robot-1", [0]), ("robot-3", [1])]
-    for group_index, (robot_id, indices) in enumerate(groups):
+    for robot_id, indices in groups:
         for index in indices:
             responses.extend(initial_responses[index * 4 + 2:index * 4 + 4])
-        last = orders[indices[-1]].dropoff
-        target = state.warehouse.parking_cells[group_index]
-        departure = ([p(x, last.y).model_dump() for x in range(last.x, target.x + 1)]
-                     + [p(target.x, y).model_dump() for y in range(last.y + 1, target.y + 1)])
         responses.extend([
-            ("LLMMovementPlan", dict(robot_id=robot_id, route=departure, explanation="Scripted parking")),
+            ("RouteIntent", dict(robot_id=robot_id, order_id=None, route_type="parking", explanation="Scripted parking intent")),
             ("SafetyDecision", dict(approved=True, conflicts=[], explanation="Scripted parking approval")),
         ])
     requests = []
@@ -98,6 +91,13 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
     payloads = [json.loads(request["messages"][-1]["content"]) for request in fleet_requests]
     for index, (current, payload) in enumerate(zip(fleet_states, payloads)):
         assert payload["selected_order"]["id"] == f"o{index+1}"
+        assert len(payload["candidates"]) == 3
+        assert [c["robot"] for c in payload["candidates"]] == payload["robots"]
+        for candidate in payload["candidates"]:
+            assert candidate["feasible"]
+            assert candidate["total_cost"] == candidate["pickup_cost"] + candidate["delivery_cost"]
+        assert payload["minimum_total_cost"] == min(c["total_cost"] for c in payload["candidates"])
+        assert payload["minimum_robot_ids"] == ["robot-1" if index == 0 else second_robot]
         assert {robot["id"] for robot in payload["robots"]} == {"robot-1", "robot-2", "robot-3"}
         assert payload["robots"] == payload["warehouse"]["robots"]
         assert payload["robots"] == [f.robot.model_dump(mode="json") for f in current.robot_forecasts]
@@ -106,6 +106,9 @@ def test_each_order_has_fresh_fleet_request_with_all_projected_robots(
         assert current.error_message is None and not current.execution_requested
         assert "selected_robot_id" not in payload
     before = {robot["id"]: robot for robot in payloads[0]["robots"]}
+    assert [c["total_cost"] for c in payloads[0]["candidates"]] == [4, 8, 12]
+    assert [c["total_cost"] for c in payloads[1]["candidates"]] == (
+        [14, 8, 4] if second_robot == "robot-3" else [2, 10, 14])
     after = {robot["id"]: robot for robot in payloads[1]["robots"]}
     assert before["robot-1"]["position"] == {"x": 0, "y": 0}
     assert before["robot-1"]["battery"] == 100

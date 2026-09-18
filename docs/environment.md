@@ -141,3 +141,16 @@ code changes. Sessions do not persist across process restarts.
 Schema-guidance and parking verification: **554 backend tests and 58 frontend tests**
 pass offline. Frontend build, pip check and git diff --check pass. No new dependency
 or live Groq request was needed. The existing Starlette deprecation warning remains.
+
+
+Hybrid Fleet verification: **570 backend tests and 58 frontend tests** pass.
+Frontend build, pip check and git diff --check pass. All provider calls were
+mocked, including real ChatGroq structured-call boundary tests. No dependencies
+or environment variables changed. The existing Starlette warning remains.
+
+
+Hybrid Route/Safety verification: **594 backend tests and 58 frontend tests** pass.
+The frontend build, pip check and git diff --check pass. RouteIntent function-call
+parsing and checkpointed feedback replacements are tested offline. No new packages,
+environment variables or live Groq calls were needed. The existing Starlette
+BlockingPortal deprecation warning remains.

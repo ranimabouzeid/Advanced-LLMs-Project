@@ -12,9 +12,11 @@ Plan builds a sequential batch using projected robot positions and batteries;
 Execute revalidates deliveries and final parking. Drop-offs are temporary service
 cells: packages stay delivered while robots chain to their next pickup or park.
 All four agents use one shared
-Groq client: Order selects orders, Fleet selects robots, Route supplies coordinates,
-and Safety approves or rejects. A* remains a standalone domain utility; agents do
-not use it. Deterministic simulation still guards actual execution.
+Groq client: Order selects orders, Fleet selects robots, Route chooses routing intent,
+and Safety interprets trusted findings. Fleet is hybrid: exact A* delivery costs constrain
+the Groq choice to feasible minima, with one corrective retry for invalid choices.
+Route uses A* after Groq intent; Safety hard-check failures veto LLM approval.
+Deterministic simulation still guards actual execution.
 
 ## Run tests (Windows)
 
@@ -33,9 +35,9 @@ See [API startup](docs/environment.md#milestone-f-api) and
 See [batch planning and execution](docs/architecture.md#sequential-multi-order-batch-planning-current-workflow)
 for state ownership, partial failure policy, and the route selector.
 
-Current schema/parking verification: **554 backend tests and 58 frontend tests pass**;
+Current hybrid agents verification: **594 backend tests and 58 frontend tests pass**;
 frontend build, pip check, and git diff --check pass. Earlier counts above are
-historical. Model decisions are mocked in tests; no live call was made. LLM routes
-can be suboptimal or invalid and Safety can make mistakes; deterministic execution
-may reject a model-approved plan. See the current workflow architecture for retry,
+historical. Model decisions are mocked in tests; no live call was made. LLM intent
+can add restrictive constraints and Safety may reject a valid route. Hard failures
+cannot be approved, and deterministic execution rechecks current state. See the current workflow architecture for retry,
 review, projection, and partial-commit behavior.
