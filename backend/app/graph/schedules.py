@@ -1,10 +1,15 @@
 """Finalize independent assignments into physical, sequential robot schedules."""
 
+import logging
+
 from . import batch
 from .agents import route_agent, safety_agent, parking_route, parking_safety
 from .state import NodeActivity, PlannedDelivery, PlannedParking, RobotSchedule, RouteRetryFeedback, WarehouseGraphState
 from app.warehouse.models import WarehouseState
 from app.warehouse.movement import execute_parking
+
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduleUnavailable(ValueError):
@@ -106,6 +111,7 @@ def finalize(state, *, client, route_tools=None, safety_tools=None):
                 parking=PlannedParking(plan=plan, safety=feedback),
                 projected_robot=next(r for r in warehouse.robots if r.id == robot_id)))
     except Exception as exc:
+        logger.exception("Schedule finalization failed")
         # Provider details and partially finalized proposals never become actionable.
         reason = str(exc) if isinstance(exc, ScheduleUnavailable) else "Schedule finalization failed; no execution permitted"
         records = tuple(PlannedDelivery.model_validate({**item.model_dump(), "status": "unplannable", "reason": reason})
@@ -173,6 +179,7 @@ def review(state, *, client, safety_tools=None):
             schedules.append(RobotSchedule.model_validate({**schedule.model_dump(),
                 "parking": {**parking.model_dump(), "safety": decision, "status": "approved", "reason": None}}))
     except Exception:
+        logger.exception("Schedule review failed")
         return dict(run_outcome="failed", execution_requested=False, safety=None,
                     error_message="Schedule review failed", node_activity=(*activity,
                     NodeActivity(node="safety", status="failed", message="Schedule review failed")))

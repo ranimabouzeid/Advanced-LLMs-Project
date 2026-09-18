@@ -287,7 +287,7 @@ def test_unexpected_failures_sanitized(http, coordinator, monkeypatch, exception
     assert "secret-token" not in response.text
 
 
-def test_real_model_failure_is_internal_not_expected_rejection(http, monkeypatch):
+def test_real_model_failure_is_internal_not_expected_rejection(http, monkeypatch, caplog):
     sid = prepared(http)
     before = state(http, sid)
 
@@ -298,6 +298,11 @@ def test_real_model_failure_is_internal_not_expected_rejection(http, monkeypatch
     response = http.post(f"{ROOT}/{sid}/plan")
     assert response.status_code == 500 and "provider-secret" not in response.text
     assert state(http, sid) == before
+    assert "Order agent failed during model" in caplog.text
+    assert "RuntimeError: provider-secret" in caplog.text
+    assert "command=plan rejected checkpoint: next=() run_outcome=failed" in caplog.text
+    assert "'node': 'order', 'status': 'failed', 'message': 'Order model failed'" in caplog.text
+    assert "API operation failed: POST" in caplog.text
 
 
 def test_real_checkpoint_failure_maps_500_and_preserves_commit(http, coordinator, monkeypatch):

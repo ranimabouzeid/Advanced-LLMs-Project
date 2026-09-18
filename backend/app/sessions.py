@@ -1,6 +1,7 @@
 """Process-local sessions whose only authoritative state is a committed checkpoint."""
 
 from contextlib import contextmanager
+import logging
 from _thread import LockType
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -22,6 +23,9 @@ from app.warehouse import (
     DeliveryPlan, Order, OrderStatus, Package, Position, Robot, RobotConflict,
     RobotStatus, ValidationIssue, ValidationResult, WarehouseSimulation, WarehouseState,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class SessionError(Exception):
@@ -106,6 +110,7 @@ class SessionCoordinator:
         except SessionError:
             raise
         except Exception as exc:
+            logger.exception("Session operation failed; committed checkpoint retained")
             raise SessionExecutionError("Session operation failed; committed state preserved") from exc
         finally:
             entry.guard.release()
@@ -161,12 +166,19 @@ class SessionCoordinator:
             ) and not any(s.parking.status in ("approved", "stale") for s in state.robot_schedules):
                 raise SessionCommandRejected(state)
             inputs = {**state.model_dump(), "command": command, "execution_requested": False}
-            self._graph.invoke(inputs, deepcopy(entry.committed), durability="sync")
+            try:
+                self._graph.invoke(inputs, deepcopy(entry.committed), durability="sync")
+            except Exception:
+                logger.exception("Session command=%s graph invocation failed", command)
+                raise
             # No other writer can use this thread under the guard. Only after
             # invoke finishes may its newest checkpoint be considered for commit.
             snapshot, result = self._read({"configurable": {"thread_id": session_id}})
             new_activity = result.node_activity[len(state.node_activity):]
             if snapshot.next or any(item.status == "failed" for item in new_activity):
+                logger.error("Session command=%s rejected checkpoint: next=%r run_outcome=%s activity=%r",
+                             command, snapshot.next, result.run_outcome,
+                             [item.model_dump(mode="json") for item in new_activity])
                 raise SessionExecutionError("Workflow operation failed; committed state preserved")
             entry.committed = deepcopy(snapshot.config)
             return result

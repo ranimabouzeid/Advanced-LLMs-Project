@@ -1,6 +1,7 @@
 """Synchronous FastAPI adapter. All session behavior goes through the coordinator."""
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -20,6 +21,7 @@ from .sessions import get_coordinator
 
 
 Coordinator = Annotated[SessionCoordinator, Depends(get_coordinator)]
+logger = logging.getLogger(__name__)
 
 
 async def require_no_body(request: Request) -> None:
@@ -78,6 +80,8 @@ def create_app(*, coordinator: SessionCoordinator | None = None,
     @app.exception_handler(SessionExecutionError)
     @app.exception_handler(Exception)
     async def internal_error(request: Request, exc: Exception):
+        logger.error("API operation failed: %s %s", request.method, request.url.path,
+                     exc_info=(type(exc), exc, exc.__traceback__))
         return _error(500, "internal_error", "Session operation could not be completed")
 
     errors = {status: {"model": ErrorResponse} for status in (404, 409, 422, 500)}

@@ -1,6 +1,7 @@
 """Shared-client Order LLM and hybrid Fleet, Route and Safety roles."""
 
 import json
+import logging
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +12,9 @@ from app.warehouse.models import DeliveryPlan
 from .state import FleetSelection, RouteIntent, OrderSelection, SafetyDecision, WarehouseGraphState
 from .tools import FleetTools, OrderTools, RouteTools, SafetyTools
 from .updates import StateUpdate, fleet_result, order_result, route_result, safety_result
+
+
+logger = logging.getLogger(__name__)
 
 
 def _decide(client, schema, instruction, data):
@@ -45,10 +49,13 @@ def order_agent(state: WarehouseGraphState, *, client: BaseChatModel,
             return order_result(state, outcome="failed", error="Model selected an ineligible order")
         return order_result(state, outcome="running", selection=selection)
     except TimeoutError:
+        logger.exception("Order agent failed during %s", stage)
         error = "Order model timed out" if stage == "model" else "Order lookup failed"
     except ValidationError:
+        logger.exception("Order agent failed during %s", stage)
         error = "Invalid structured order output" if stage == "model" else "Order lookup failed"
     except Exception:
+        logger.exception("Order agent failed during %s", stage)
         error = "Order model failed" if stage == "model" else "Order lookup failed"
     return order_result(state, outcome="failed", error=error)
 
@@ -107,6 +114,7 @@ def fleet_agent(state: WarehouseGraphState, *, client: BaseChatModel,
             }
         return fleet_result(state, outcome="failed", message="Fleet selection rejected: expected a feasible minimum-cost robot")
     except Exception:
+        logger.exception("Fleet agent failed")
         return fleet_result(state, outcome="failed", message="Fleet model or structured input/output failed")
 
 
@@ -158,6 +166,7 @@ def route_agent(state: WarehouseGraphState, *, client: BaseChatModel,
             return route_result(state, outcome="unreachable", explanation="A* found no route under the supplied constraints")
         return route_result(state, outcome="planned", plan=plan, explanation=intent.explanation)
     except Exception:
+        logger.exception("Route agent failed")
         return route_result(state, outcome="failed", error="Route model, intent or planner failed")
 
 
@@ -202,6 +211,7 @@ def safety_agent(state: WarehouseGraphState, *, client: BaseChatModel,
         findings = tools.inspect_delivery(state.warehouse, plan)
         return safety_result(state, result=_safety_decision(client, context, findings))
     except Exception:
+        logger.exception("Safety agent failed")
         return safety_result(state, error="Safety model or structured input/output failed")
 
 
