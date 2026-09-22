@@ -15,6 +15,7 @@ export function useWarehouseSession() {
   const [httpError, setError] = useState(null);
   const [replacementNotice, setReplacement] = useState(null);
   const [selectedCell, setSelectedCell] = useState(null);
+  const [executeReplay, setExecuteReplay] = useState(null);
   const startup = useRef(null);
   const current = useRef(null);
   const active = useRef(true);
@@ -39,6 +40,7 @@ export function useWarehouseSession() {
     if (action !== 'createSession' && !oldId) return false;
     lock.current = true;
     const ticket = ++sequence.current;
+    const preExecuteState = action === 'execute' ? current.current?.state : null;
     setPending(action);
     setError(null);
     try {
@@ -53,12 +55,17 @@ export function useWarehouseSession() {
         setCommand({ action, outcome: result.outcome, error: result.error });
         setReplacement(action === 'execute' && result.outcome === 'ready' &&
           result.state.execution_requested === false ? proposalRevision(result.state) : null);
+        // Visual-only replay trigger: only when Execute actually delivered
+        // something committed, never for a replan/replacement proposal.
+        setExecuteReplay(action === 'execute' && preExecuteState &&
+          ['delivered', 'partial'].includes(result.state.run_outcome)
+          ? { before: preExecuteState, after: result.state, at: Date.now() } : null);
       } else if (action !== 'refresh') {
         setCommand(null); setReplacement(null);
       } else if (proposalRevision(result.state) !== replacementNotice) {
         setReplacement(null);
       }
-      if (action === 'reset' || action === 'createSession') setSelectedCell(null);
+      if (action === 'reset' || action === 'createSession') { setSelectedCell(null); setExecuteReplay(null); }
       return true;
     } catch (error) {
       if (active.current && sequence.current === ticket) setError(error);
@@ -68,5 +75,5 @@ export function useWarehouseSession() {
     }
   }
   return { session, pendingAction, lastCommand, httpError, replacementNotice,
-    selectedCell, setSelectedCell, run };
+    selectedCell, setSelectedCell, executeReplay, run };
 }
