@@ -908,3 +908,41 @@ checkpoints to migrate. All pytest calls are offline. A separately approved live
 diagnostic before the Route conversion reached READY. A subsequent user-supplied
 live log identified Fleet model disagreement as the controlled Plan rejection fixed
 by deterministic assignment authority. Other operational failures remain possible.
+
+### Dashboard redesign (Ghadi-UI branch)
+
+The React dashboard was re-skinned and re-laid out to match the course
+description's Step 4 mockup: a dark command-center theme with a tabbed
+header (Dashboard, Orders, Robots, Live State), a system status pill, a
+Warehouse Map panel with its own toolbar and legend column, compact Robot
+Status and Order Queue panels, an Order/Robot creation dialog, a Full State
+dialog, and an Agent Activity panel that shows the four LangGraph roles as a
+left-to-right flow instead of a plain list. This is a frontend-only change:
+no API routes, request/response shapes, or backend logic changed, and
+`src/api/client.js` and the session hook's request/lock/stale-response
+handling are unmodified.
+
+A few dashboard elements are client-side conveniences with no server
+counterpart, and are documented here so they are not mistaken for backend
+guarantees:
+
+- **Order wait timers** ("Waiting Ns") are measured from when the browser
+  first saw the order, not from a server timestamp; they reset on reload
+  and are wrong after a page refresh mid-queue.
+- **Rush Mode** creates three orders by calling the existing create-order
+  endpoint three times in sequence (client-side `lib/derive.js`
+  `generateRushOrders` picks free pickup cells); it adds no backend batching.
+- **Block Aisle** is a one-click convenience over the existing single-cell
+  block endpoint: it blocks the selected map cell, or otherwise a cell
+  partway through the current proposed route, to make a replanning demo
+  easy to trigger. It is not a multi-cell/aisle-aware backend operation.
+- **Route replay** animates a robot along the pickup/delivery/parking route
+  captured just before Execute was requested, only for orders the committed
+  Execute response actually shows as delivered (a partial batch replays
+  only what was truly delivered). It is a purely visual client-side
+  interpolation between committed states, not a live agent/motion stream;
+  it honors `prefers-reduced-motion` and can be skipped.
+- The mockup's EXPRESS/NORMAL order priority and a numeric collision-risk
+  score (e.g. "0.31") have no backend field to source them from and are
+  intentionally not reproduced; the dashboard shows order status and a
+  yes/no collision-risk plus conflict count instead.
