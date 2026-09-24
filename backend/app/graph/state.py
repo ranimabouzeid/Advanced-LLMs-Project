@@ -83,8 +83,8 @@ class SafetyDecision(WorkflowModel):
 
     approved: bool = Field(strict=True, description="True only if trusted hard checks pass and the LLM approves this supplied route; hard failures require false. Does not approve other routes or execute movement.")
     conflicts: tuple[ShortText, ...] = Field(default=(), max_length=100,
-        description="Specific rejection findings: identify the leg, cell or robot and needed correction where applicable. Must be empty when approved.")
-    explanation: ShortText = Field(description="Reason for the decision; when rejected, identify specific constraints requiring correction before replanning.")
+        description="Specific rejection findings: identify the leg, cell or robot and needed correction where applicable. If approved=true, MUST be empty. Any conflict requires approved=false. Positive observations such as battery is sufficient or route is clear belong in explanation, NOT conflicts.")
+    explanation: ShortText = Field(description="Reason for the decision, including positive observations such as sufficient battery or a clear route; when rejected, identify specific constraints requiring correction before replanning.")
 
     @model_validator(mode="after")
     def consistent_decision(self) -> Self:

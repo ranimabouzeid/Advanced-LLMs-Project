@@ -179,3 +179,58 @@ def test_shared_dropoff_requires_previous_robot_departure_before_approval():
     result = safety_agent(local, client=model)
     assert not result["safety"].approved
     assert any(first.robot_id in text and "(9,0)" in text for text in result["safety"].conflicts)
+
+
+@pytest.mark.parametrize("repair", ["approve", "reject", "invalid"])
+@pytest.mark.parametrize("hard_failure", [False, True])
+def test_consistency_repair_is_bounded_and_reuses_findings(state, monkeypatch, repair, hard_failure):
+    from unittest.mock import Mock
+    if hard_failure:
+        data = state.model_dump()
+        data["warehouse"]["robots"][0]["battery"] = 0
+        state = WarehouseGraphState.model_validate(data)
+    invalid = dict(approved=True, conflicts=["battery is sufficient"], explanation="private model text")
+    second = (invalid if repair == "invalid" else
+              dict(approved=repair == "approve", conflicts=[] if repair == "approve" else ["Context conflict"],
+                   explanation="Reviewed same findings"))
+    model = client(invalid, second)
+    tools = SafetyTools()
+    inspect = Mock(wraps=tools.inspect_delivery)
+    monkeypatch.setattr(tools, "inspect_delivery", inspect)
+    before = state.model_dump()
+    update = safety_agent(state, client=model, tools=tools)
+    assert len(model.calls) == 2
+    assert inspect.call_count == 1
+    assert model.calls[0][1] == model.calls[1][1]
+    assert "REPAIR:" in model.calls[1][2]
+    assert state.model_dump() == before
+    if repair == "invalid":
+        assert update["safety"] is None
+        assert "private model text" not in update["error_message"]
+    else:
+        assert update["safety"].approved == (repair == "approve" and not hard_failure)
+    if repair != "approve" or hard_failure:
+        assert update["run_outcome"] == "failed" and not update["execution_requested"]
+    else:
+        assert update["run_outcome"] == "ready"
+
+
+def test_real_groq_parser_contradiction_is_repaired_offline(state, monkeypatch):
+    import json
+    from app.config import LLMSettings, create_model_client
+    model = create_model_client(LLMSettings(model="test-model", api_key="test-placeholder", max_retries=0))
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        output = dict(approved=True, conflicts=["battery sufficient"] if len(calls) == 1 else [],
+                      explanation="Route checked")
+        return {"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "offline-call", "type": "function", "function": {
+                    "name": "SafetyDecision", "arguments": json.dumps(output)}}]}}], "model": "test-model"}
+
+    monkeypatch.setattr(model.client, "create", completion)
+    assert safety_agent(state, client=model)["run_outcome"] == "ready"
+    assert len(calls) == 2
+    assert calls[0]["messages"][-1] == calls[1]["messages"][-1]

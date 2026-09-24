@@ -158,7 +158,7 @@ def route_agent(state: WarehouseGraphState, *, tools: RouteTools | None = None) 
 def _safety_decision(client, context, findings):
     """Keep LLM interpretation but enforce every trusted hard failure as rejection."""
     context["trusted_findings"] = findings.model_dump(mode="json")
-    decision = _decide(client, SafetyDecision,
+    instruction = (
         "You evaluate safety only. Interpret trusted_findings as deterministic facts for the "
         "currently supplied delivery or parking route and its projected schedule context. "
         "Hard failures cannot be overridden: if route_valid is false you must reject. If hard "
@@ -167,7 +167,27 @@ def _safety_decision(client, context, findings):
         "Route is deterministic: unchanged inputs cannot produce a different path. Do not invent contrary facts, "
         "construct replacement coordinates or execute movement. Drop-off is temporary: the "
         "package remains delivered while the robot continues to its next pickup or final parking. "
-        "Your approval applies only to this route, not unreviewed later movements.", context)
+        "Your approval applies only to this route, not unreviewed later movements. "
+        "If approved=true, conflicts MUST be empty. Positive observations such as battery is sufficient "
+        "or route is clear belong in explanation, NOT conflicts. If any conflict is reported, approved MUST be false.")
+    try:
+        decision = _decide(client, SafetyDecision, instruction, context)
+    except ValidationError as exc:
+        # Repair only the known cross-field contradiction, not transport failures or
+        # unrelated malformed output. Both parser errors and local revalidation land here.
+        if exc.title != "SafetyDecision" or not any(
+            error["loc"] == () and error["type"] == "value_error"
+            and error["msg"] == "Value error, Approval cannot also report conflicts"
+            for error in exc.errors()
+        ):
+            raise
+        logger.warning("Contradictory SafetyDecision; attempting one consistency repair", exc_info=True)
+        decision = _decide(client, SafetyDecision, instruction +
+            " REPAIR: Your previous output approved the route while also reporting conflicts. "
+            "Repair only this schema/consistency problem using the SAME supplied route, context and trusted findings. "
+            "Move positive observations to explanation; approval requires conflicts=[]. "
+            "If there is a real conflict, return approved=false. If trusted route_valid=false, reject. "
+            "Do not change or reinterpret hard findings to obtain approval. This is the only repair attempt.", context)
     if findings.route_valid:
         return decision
     hard = [f"{issue.leg or 'movement'}: {issue.code}: {issue.message}"

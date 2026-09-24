@@ -752,6 +752,18 @@ designated staging, and reservations. Sequential schedule projection provides th
 occupancy for shared drop-offs; state validation enforces schedule references and
 unique parking reservations. Each subsequent pickup/departure is inspected separately.
 
+Safety structured-output consistency repair applies to both delivery and parking,
+including Execute review. Approval requires an empty conflicts list; positive
+observations belong in explanation. The existing Pydantic invariant is unchanged.
+A SafetyDecision validation error for approval with conflicts permits exactly one
+additional structured model invocation with stricter consistency instructions and
+the same context and trusted findings. It does not rerun A* or safety inspection.
+Other errors are not retried by this repair path. If repair fails, existing agent
+and schedule boundaries log the exception and publish a sanitized failed workflow
+outcome without execution. Valid repaired output still passes through hard-failure
+enforcement; it cannot override route_valid=false. This repair is separate from
+the provider client's existing transport retry configuration.
+
 The complete ValidationResult is sent to Groq as trusted_findings. SafetyDecision
 retains approved/conflicts/explanation. When hard checks pass, the model may still
 reject for contextual reasons. When any hard check fails, the final decision is

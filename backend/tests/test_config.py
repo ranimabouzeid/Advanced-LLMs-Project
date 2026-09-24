@@ -60,7 +60,7 @@ def test_provider_construction_is_once_and_does_not_invoke(monkeypatch):
     shared = create_model_client(settings)
     assert shared is fake and len(calls) == 1
     assert calls[0] == dict(model="test-model", api_key=settings.api_key,
-                            timeout=30, max_retries=2)
+                            timeout=30, max_retries=2, max_tokens=512)
     assert create_model_client(client=shared) is shared and len(calls) == 1
 
 

@@ -151,6 +151,53 @@ def test_plan_no_work(http):
     assert result["outcome"] == "no_work" and result["error"] is None
 
 
+@pytest.mark.parametrize("phase", ["preview", "parking", "execute_parking"])
+@pytest.mark.parametrize("repaired", [True, False])
+def test_safety_consistency_repair_http_outcome(phase, repaired, monkeypatch):
+    from unittest.mock import Mock
+    from llm_fakes import client
+    from app.graph.state import SafetyDecision
+    from app.graph.tools import RouteTools, SafetyTools
+    inspections = Mock()
+    for cls, name in [(RouteTools, "plan_delivery"), (RouteTools, "plan_parking"),
+                      (SafetyTools, "inspect_delivery"), (SafetyTools, "inspect_parking")]:
+        original = getattr(cls, name)
+        def tracked(self, *args, _original=original, _name=name, **kwargs):
+            getattr(inspections, _name)()
+            return _original(self, *args, **kwargs)
+        monkeypatch.setattr(cls, name, tracked)
+    good = dict(approved=True, conflicts=[], explanation="Safe route")
+    bad = dict(approved=True, conflicts=["battery sufficient"], explanation="private-provider-detail")
+    prefix = [] if phase == "preview" else [good] * (4 if phase == "execute_parking" else 2)
+    model = client(scripts={"SafetyDecision": [*prefix, bad, good if repaired else bad]})
+    coordinator = SessionCoordinator(client=model)
+    with TestClient(create_app(coordinator=coordinator), raise_server_exceptions=False) as http:
+        sid = prepared(http)
+        assert http.post(f"{ROOT}/{sid}/blocked-cells", json={"x": 5, "y": 0}).status_code == 200
+        before = state(http, sid)["warehouse"]
+        if phase == "execute_parking":
+            assert command(http, sid, "plan")["outcome"] == "ready"
+        result = command(http, sid, "execute" if phase == "execute_parking" else "plan")
+        assert result["outcome"] == (("delivered" if phase == "execute_parking" else "ready") if repaired else "failed")
+        assert "private-provider-detail" not in json.dumps(result)
+        assert "ValidationError" not in json.dumps(result)
+        assert len([call for call in model.calls if call[0] is SafetyDecision]) == (
+            6 if phase == "execute_parking" else 4 if repaired or phase == "parking" else 2)
+        assert state(http, sid) == result["state"]
+        finalized = repaired or phase != "preview"
+        assert inspections.plan_delivery.call_count == (2 if finalized else 1)
+        assert inspections.plan_parking.call_count == int(finalized)
+        assert inspections.inspect_delivery.call_count == (3 if phase == "execute_parking" else 2 if finalized else 1)
+        assert inspections.inspect_parking.call_count == (2 if phase == "execute_parking" else int(finalized))
+        if phase != "execute_parking" or not repaired:
+            assert result["state"]["warehouse"] == before
+        if not repaired:
+            assert not result["state"]["execution_requested"]
+            if phase != "execute_parking":
+                assert command(http, sid, "execute")["outcome"] != "delivered"
+            assert state(http, sid)["warehouse"] == before
+
+
 def test_plan_reports_fleet_candidates_unreachable(http):
     sid = prepared(http)
     assert http.post(f"{ROOT}/{sid}/blocked-cells", json=ORDER["pickup"]).status_code == 200
