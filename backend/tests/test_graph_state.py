@@ -60,7 +60,7 @@ def test_retry_boundaries(simulation, limit):
 
 def test_nested_models_and_json_roundtrip(simulation):
     plan = plan_delivery(simulation.state, "o1", "robot-1")
-    safety = SafetyDecision(approved=True, explanation="Mock approval")
+    safety = SafetyDecision(approved=True, conflicts=(), explanation="Mock approval")
     state = WarehouseGraphState(
         warehouse=simulation.state, command="execute", execution_requested=True,
         order_selection=OrderSelection(order_id="o1", explanation="First pending order"),

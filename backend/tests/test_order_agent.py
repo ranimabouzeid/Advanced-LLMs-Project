@@ -131,7 +131,7 @@ def test_ownership_and_stale_state_invalidation(simulation, valid):
     prior = NodeActivity(node="safety", status="completed")
     state = WarehouseGraphState(warehouse=simulation.state, command="execute", execution_requested=True,
         order_selection=OrderSelection(order_id="o1", explanation="Old choice"), selected_robot_id="robot-1",
-        delivery_plan=plan, safety=SafetyDecision(approved=True, explanation="Mock approval"), planning_outcome="planned",
+        delivery_plan=plan, safety=SafetyDecision(approved=True, conflicts=(), explanation="Mock approval"), planning_outcome="planned",
         replan_count=2, run_outcome="ready", error_message="Old error", node_activity=(prior,))
     update = order_agent(state, client=fake({"order_id": "o1" if valid else "missing", "explanation": "Choice"}))
     assert set(update) == {"order_selection", "selected_robot_id", "delivery_plan", "safety", "planning_outcome",

@@ -151,11 +151,12 @@ def test_plan_no_work(http):
     assert result["outcome"] == "no_work" and result["error"] is None
 
 
-@pytest.mark.parametrize("phase", ["preview", "parking", "execute_parking"])
+@pytest.mark.parametrize("phase", ["preview", "final_delivery", "parking", "execute_delivery", "execute_parking"])
 @pytest.mark.parametrize("repaired", [True, False])
-def test_safety_consistency_repair_http_outcome(phase, repaired, monkeypatch):
+@pytest.mark.parametrize("failure", ["contradiction", "tool_use_failed"])
+def test_safety_structured_repair_http_outcome(phase, repaired, failure, monkeypatch):
     from unittest.mock import Mock
-    from llm_fakes import client
+    from llm_fakes import client, tool_use_failed
     from app.graph.state import SafetyDecision
     from app.graph.tools import RouteTools, SafetyTools
     inspections = Mock()
@@ -168,32 +169,39 @@ def test_safety_consistency_repair_http_outcome(phase, repaired, monkeypatch):
         monkeypatch.setattr(cls, name, tracked)
     good = dict(approved=True, conflicts=[], explanation="Safe route")
     bad = dict(approved=True, conflicts=["battery sufficient"], explanation="private-provider-detail")
-    prefix = [] if phase == "preview" else [good] * (4 if phase == "execute_parking" else 2)
+    if failure == "tool_use_failed":
+        bad = tool_use_failed()
+    prefix_size = {"preview": 0, "final_delivery": 1, "parking": 2,
+                   "execute_delivery": 3, "execute_parking": 4}[phase]
+    prefix = [good] * prefix_size
+    executing = phase.startswith("execute_")
     model = client(scripts={"SafetyDecision": [*prefix, bad, good if repaired else bad]})
     coordinator = SessionCoordinator(client=model)
     with TestClient(create_app(coordinator=coordinator), raise_server_exceptions=False) as http:
         sid = prepared(http)
         assert http.post(f"{ROOT}/{sid}/blocked-cells", json={"x": 5, "y": 0}).status_code == 200
         before = state(http, sid)["warehouse"]
-        if phase == "execute_parking":
+        if executing:
             assert command(http, sid, "plan")["outcome"] == "ready"
-        result = command(http, sid, "execute" if phase == "execute_parking" else "plan")
-        assert result["outcome"] == (("delivered" if phase == "execute_parking" else "ready") if repaired else "failed")
+        result = command(http, sid, "execute" if executing else "plan")
+        assert result["outcome"] == (("delivered" if executing else "ready") if repaired else "failed")
         assert "private-provider-detail" not in json.dumps(result)
         assert "ValidationError" not in json.dumps(result)
+        assert "BadRequestError" not in json.dumps(result)
         assert len([call for call in model.calls if call[0] is SafetyDecision]) == (
-            6 if phase == "execute_parking" else 4 if repaired or phase == "parking" else 2)
+            (6 if executing else 4) if repaired else prefix_size + 2)
         assert state(http, sid) == result["state"]
         finalized = repaired or phase != "preview"
+        parked = repaired or phase in ("parking", "execute_delivery", "execute_parking")
         assert inspections.plan_delivery.call_count == (2 if finalized else 1)
-        assert inspections.plan_parking.call_count == int(finalized)
-        assert inspections.inspect_delivery.call_count == (3 if phase == "execute_parking" else 2 if finalized else 1)
-        assert inspections.inspect_parking.call_count == (2 if phase == "execute_parking" else int(finalized))
-        if phase != "execute_parking" or not repaired:
+        assert inspections.plan_parking.call_count == int(parked)
+        assert inspections.inspect_delivery.call_count == (3 if executing else 2 if finalized else 1)
+        assert inspections.inspect_parking.call_count == (2 if phase == "execute_parking" or (executing and repaired) else int(parked))
+        if not executing or not repaired:
             assert result["state"]["warehouse"] == before
         if not repaired:
             assert not result["state"]["execution_requested"]
-            if phase != "execute_parking":
+            if not executing:
                 assert command(http, sid, "execute")["outcome"] != "delivered"
             assert state(http, sid)["warehouse"] == before
 
@@ -204,6 +212,66 @@ def test_plan_reports_fleet_candidates_unreachable(http):
     result = command(http, sid, "plan")
     assert result["outcome"] == "unreachable"
     assert [item["node"] for item in result["state"]["node_activity"]] == ["order", "fleet"]
+
+
+@pytest.mark.parametrize("repaired", [True, False])
+def test_four_order_plan_with_later_parking_provider_failure(repaired):
+    import httpx
+    from langchain_groq import ChatGroq
+    from app.graph.state import FleetExplanation, OrderSelection, SafetyDecision
+    from llm_fakes import automatic, tool_use_failed
+    schemas = {schema.__name__: schema for schema in (OrderSelection, FleetExplanation, SafetyDecision)}
+    calls, parking_calls = [], []
+
+    def completion(request):
+        body = json.loads(request.content)
+        schema = schemas[body["tools"][0]["function"]["name"]]
+        data = json.loads(body["messages"][-1]["content"])
+        calls.append((schema, data, body["messages"][0]["content"]))
+        if schema is SafetyDecision and "movement_plan" in data:
+            parking_calls.append(calls[-1])
+            # Fail at a later robot's parking, after an earlier parking approval.
+            if len(parking_calls) == 2 or (len(parking_calls) == 3 and not repaired):
+                return httpx.Response(400, json={"error": tool_use_failed().body})
+        output = automatic(schema, data)
+        return httpx.Response(200, json={"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "offline-call", "type": "function", "function": {
+                    "name": schema.__name__, "arguments": output.model_dump_json()}}]}}], "model": "test-model"})
+
+    with httpx.Client(transport=httpx.MockTransport(completion)) as provider:
+        model = ChatGroq(model="test-model", api_key="test-placeholder", max_retries=0, http_client=provider)
+        with TestClient(create_app(coordinator=SessionCoordinator(client=model)),
+                        raise_server_exceptions=False) as http:
+            sid = session(http)
+            for index, (x, y) in enumerate(((2, 0), (2, 4), (2, 8), (4, 4))):
+                order = {**ORDER, "order_id": f"o{index}", "package_id": f"p{index}",
+                         "pickup": {"x": x, "y": y}}
+                assert http.post(f"{ROOT}/{sid}/orders", json=order).status_code == 201
+            before = state(http, sid)["warehouse"]
+            result = command(http, sid, "plan")
+            assert result["outcome"] == ("ready" if repaired else "failed"), result["error"]
+            assert result["state"]["warehouse"] == before
+            assert state(http, sid) == result["state"]
+            assert "private-provider-detail" not in json.dumps(result)
+            assert len(parking_calls) >= 3
+            assert parking_calls[1][1] == parking_calls[2][1]
+            assert "REPAIR:" in parking_calls[2][2]
+            assert len([call for call in calls if "REPAIR:" in call[2]]) == 1
+            assert len([call for call in calls if call[0] is OrderSelection]) == 4
+            assert len([call for call in calls if call[0] is FleetExplanation]) == 4
+            if repaired:
+                assert len(result["state"]["planned_deliveries"]) == 4
+                assert len(result["state"]["robot_schedules"]) >= 2
+                assert all(item["status"] == "approved" for item in result["state"]["planned_deliveries"])
+                assert command(http, sid, "execute")["outcome"] == "delivered"
+                assert all(order["status"] == "delivered" for order in state(http, sid)["warehouse"]["orders"])
+            else:
+                assert len(parking_calls) == 3
+                assert not result["state"]["execution_requested"]
+                assert not result["state"]["robot_schedules"]
+                assert command(http, sid, "execute")["outcome"] != "delivered"
+                assert state(http, sid)["warehouse"] == before
 
 
 def test_fleet_candidates_unreachable_during_stale_execute(http):

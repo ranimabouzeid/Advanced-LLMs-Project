@@ -752,12 +752,18 @@ designated staging, and reservations. Sequential schedule projection provides th
 occupancy for shared drop-offs; state validation enforces schedule references and
 unique parking reservations. Each subsequent pickup/departure is inspected separately.
 
-Safety structured-output consistency repair applies to both delivery and parking,
-including Execute review. Approval requires an empty conflicts list; positive
-observations belong in explanation. The existing Pydantic invariant is unchanged.
-A SafetyDecision validation error for approval with conflicts permits exactly one
-additional structured model invocation with stricter consistency instructions and
-the same context and trusted findings. It does not rerun A* or safety inspection.
+Safety structured-output repair applies to delivery previews, schedule finalization,
+final parking and Execute review. All three fields (approved, conflicts, explanation)
+are required, including an explicit empty conflicts list for approval; positive
+observations belong in explanation. The approval-with-conflicts validator is unchanged.
+Groq BadRequestError with structured error code tool_use_failed (in the SDK body or
+its error envelope) permits one repair, even when the provider rejects the tool call
+before Pydantic parsing. SafetyDecision validation errors for missing required fields
+or approval with conflicts use the same single repair budget. The repair explicitly
+requires every field, no extra fields and conflicts=[] for approval. Both calls receive
+identical route context and trusted findings; neither A* nor inspection runs again.
+The repair call has no retry handler, so a second failure cannot start another retry,
+including when its error type differs from the first.
 Other errors are not retried by this repair path. If repair fails, existing agent
 and schedule boundaries log the exception and publish a sanitized failed workflow
 outcome without execution. Valid repaired output still passes through hard-failure

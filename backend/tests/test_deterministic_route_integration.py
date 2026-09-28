@@ -149,7 +149,7 @@ def test_live_fleet_disagreement_cannot_abort_plan_when_r2_is_minimum(monkeypatc
                       else dict(explanation="robot-2 has minimum complete cost 4 with sufficient battery"))
         else:
             assert name == "SafetyDecision" and data["trusted_findings"]["route_valid"]
-            output = dict(approved=True, explanation="Hard checks pass")
+            output = dict(approved=True, conflicts=[], explanation="Hard checks pass")
         return {"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
             "role": "assistant", "content": None, "tool_calls": [{"id": "mock-call", "type": "function",
                 "function": {"name": name, "arguments": json.dumps(output)}}]}}], "model": "offline"}

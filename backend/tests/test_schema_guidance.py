@@ -49,7 +49,7 @@ def test_guidance_preserves_required_fields_and_strict_validation():
     assert set(FleetSelection.model_json_schema()["required"]) == {"robot_id", "explanation"}
     assert FleetSelection(robot_id=None, explanation="No available robot").robot_id is None
     with pytest.raises(ValueError):
-        SafetyDecision(approved="true", explanation="Not a boolean")
+        SafetyDecision(approved="true", conflicts=[], explanation="Not a boolean")
     with pytest.raises(ValueError):
         LLMRoutePlan(robot_id="r", order_id="o", route_to_pickup=[], route_to_dropoff=[], explanation="Empty")
 

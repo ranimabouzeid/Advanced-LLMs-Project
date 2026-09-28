@@ -3,6 +3,7 @@
 import json
 import logging
 
+from groq import BadRequestError
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
@@ -168,22 +169,37 @@ def _safety_decision(client, context, findings):
         "construct replacement coordinates or execute movement. Drop-off is temporary: the "
         "package remains delivered while the robot continues to its next pickup or final parking. "
         "Your approval applies only to this route, not unreviewed later movements. "
-        "If approved=true, conflicts MUST be empty. Positive observations such as battery is sufficient "
-        "or route is clear belong in explanation, NOT conflicts. If any conflict is reported, approved MUST be false.")
+        "Return ALL required SafetyDecision fields every time: approved (boolean), conflicts "
+        "(list of strings), explanation (string). NEVER omit conflicts. Do not add extra fields. "
+        "If approved=true, conflicts MUST be empty ([]). Positive observations such as battery sufficient, "
+        "route clear or no collision risk belong in explanation, NOT conflicts. "
+        "If any real conflict exists, approved MUST be false.")
     try:
         decision = _decide(client, SafetyDecision, instruction, context)
-    except ValidationError as exc:
-        # Repair only the known cross-field contradiction, not transport failures or
-        # unrelated malformed output. Both parser errors and local revalidation land here.
-        if exc.title != "SafetyDecision" or not any(
-            error["loc"] == () and error["type"] == "value_error"
-            and error["msg"] == "Value error, Approval cannot also report conflicts"
-            for error in exc.errors()
-        ):
+    except (BadRequestError, ValidationError) as exc:
+        if isinstance(exc, BadRequestError):
+            # Groq can reject the tool call before the Pydantic parser runs.
+            # Accept the SDK's unwrapped body or the HTTP error envelope, never
+            # classify failures by matching text in the generated response.
+            body = exc.body if isinstance(exc.body, dict) else {}
+            detail = body.get("error", body)
+            repairable = isinstance(detail, dict) and detail.get("code") == "tool_use_failed"
+        else:
+            repairable = exc.title == "SafetyDecision" and any(
+                error["type"] == "missing" or (
+                    error["loc"] == () and error["type"] == "value_error"
+                    and error["msg"] == "Value error, Approval cannot also report conflicts"
+                ) for error in exc.errors()
+            )
+        if not repairable:
             raise
-        logger.warning("Contradictory SafetyDecision; attempting one consistency repair", exc_info=True)
+        logger.warning("Invalid SafetyDecision structured output; attempting one repair", exc_info=True)
+        # This invocation is outside the protected first attempt: every failure
+        # propagates to the existing controlled workflow boundary, with no loop.
         decision = _decide(client, SafetyDecision, instruction +
-            " REPAIR: Your previous output approved the route while also reporting conflicts. "
+            " REPAIR: Your previous structured output was invalid. Return a valid SafetyDecision "
+            "object with ALL required fields: approved, conflicts, explanation. Never omit conflicts. "
+            "If approved=true, conflicts must be []. Do not add extra fields. "
             "Repair only this schema/consistency problem using the SAME supplied route, context and trusted findings. "
             "Move positive observations to explanation; approval requires conflicts=[]. "
             "If there is a real conflict, return approved=false. If trusted route_valid=false, reject. "

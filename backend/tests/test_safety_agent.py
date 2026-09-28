@@ -5,7 +5,7 @@ from app.graph.agents import safety_agent
 from app.graph.state import OrderSelection, SafetyDecision, WarehouseGraphState
 from app.graph.tools import SafetyTools
 from app.warehouse import Position, WarehouseSimulation, plan_delivery
-from llm_fakes import client, Fake
+from llm_fakes import client, Fake, tool_use_failed
 
 
 @pytest.fixture
@@ -234,3 +234,95 @@ def test_real_groq_parser_contradiction_is_repaired_offline(state, monkeypatch):
     assert safety_agent(state, client=model)["run_outcome"] == "ready"
     assert len(calls) == 2
     assert calls[0]["messages"][-1] == calls[1]["messages"][-1]
+
+
+@pytest.mark.parametrize("first", ["provider", "missing"])
+@pytest.mark.parametrize("second", ["approve", "provider", "missing", "contradiction"])
+@pytest.mark.parametrize("hard_failure", [False, True])
+def test_missing_fields_share_one_repair_budget(state, monkeypatch, caplog, first, second, hard_failure):
+    from unittest.mock import Mock
+    if hard_failure:
+        data = state.model_dump()
+        data["warehouse"]["blocked_cells"] = [Position(x=1, y=0)]
+        state = WarehouseGraphState.model_validate(data)
+    outputs = {
+        "provider": tool_use_failed(),
+        "missing": dict(approved=True, explanation="private-provider-detail"),
+        "contradiction": dict(approved=True, conflicts=["battery sufficient"], explanation="safe"),
+        "approve": dict(approved=True, conflicts=[], explanation="safe"),
+    }
+    model = client(scripts={"SafetyDecision": [outputs[first], outputs[second]]})
+    tools = SafetyTools()
+    inspect = Mock(wraps=tools.inspect_delivery)
+    context = Mock(wraps=tools.current_context)
+    monkeypatch.setattr(tools, "inspect_delivery", inspect)
+    monkeypatch.setattr(tools, "current_context", context)
+    before = state.model_dump()
+    update = safety_agent(state, client=model, tools=tools)
+    assert len(model.calls) == 2
+    assert inspect.call_count == context.call_count == 1
+    assert model.calls[0][1] == model.calls[1][1]
+    assert "NEVER omit conflicts" in model.calls[0][2]
+    assert "ALL required fields: approved, conflicts, explanation" in model.calls[1][2]
+    assert state.model_dump() == before
+    assert any(record.exc_info for record in caplog.records)
+    if second != "approve":
+        assert update["safety"] is None
+        assert "private-provider-detail" not in update["error_message"]
+    elif hard_failure:
+        assert not update["safety"].approved
+        assert any("blocked" in text for text in update["safety"].conflicts)
+    else:
+        assert update["safety"].approved and update["safety"].conflicts == ()
+    if second != "approve" or hard_failure:
+        assert update["run_outcome"] == "failed" and not update["execution_requested"]
+    else:
+        assert update["run_outcome"] == "ready"
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("code", ["tool_use_failed", "invalid_request_error"])
+def test_provider_repair_requires_exact_structured_error_code(state, wrapped, code):
+    model = client(scripts={"SafetyDecision": [tool_use_failed(wrapped=wrapped, code=code),
+        dict(approved=True, conflicts=[], explanation="safe")]})
+    update = safety_agent(state, client=model)
+    assert len(model.calls) == (2 if code == "tool_use_failed" else 1)
+    assert update["run_outcome"] == ("ready" if code == "tool_use_failed" else "failed")
+
+
+@pytest.mark.parametrize("repaired", [True, False])
+def test_real_groq_http_tool_failure_is_repaired_offline(state, repaired):
+    import json
+    import httpx
+    from langchain_groq import ChatGroq
+    calls = []
+
+    def completion(request):
+        calls.append(json.loads(request.content))
+        if len(calls) == 1 or not repaired:
+            return httpx.Response(400, json={"error": tool_use_failed().body})
+        return httpx.Response(200, json={"choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{
+                "id": "offline-call", "type": "function", "function": {
+                    "name": "SafetyDecision", "arguments": json.dumps(dict(
+                        approved=True, conflicts=[], explanation="safe"))}}]}}], "model": "test-model"})
+
+    with httpx.Client(transport=httpx.MockTransport(completion)) as http:
+        model = ChatGroq(model="test-model", api_key="test-placeholder", max_retries=0, http_client=http)
+        update = safety_agent(state, client=model)
+    assert len(calls) == 2
+    assert calls[0]["messages"][-1] == calls[1]["messages"][-1]
+    schema = calls[0]["tools"][0]["function"]["parameters"]
+    assert set(schema["required"]) == {"approved", "conflicts", "explanation"}
+    assert update["run_outcome"] == ("ready" if repaired else "failed")
+    if not repaired:
+        assert update["safety"] is None and not update["execution_requested"]
+        assert "private-provider-detail" not in update["error_message"]
+
+
+def test_safety_schema_requires_conflicts_and_preserves_consistency():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="conflicts"):
+        SafetyDecision(approved=True, explanation="safe")
+    with pytest.raises(ValidationError, match="Approval cannot also report conflicts"):
+        SafetyDecision(approved=True, conflicts=["battery sufficient"], explanation="safe")

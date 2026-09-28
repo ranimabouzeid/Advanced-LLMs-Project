@@ -2,6 +2,8 @@
 
 import json
 
+import httpx
+from groq import BadRequestError
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
@@ -12,7 +14,7 @@ from app.graph.state import FleetExplanation, OrderSelection, SafetyDecision
 
 class Fake(FakeMessagesListChatModel):
     auto_select: bool = False
-    scripts: dict[str, list[dict]] = Field(default_factory=dict)
+    scripts: dict[str, list[dict | Exception]] = Field(default_factory=dict)
     calls: list = Field(default_factory=list)
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
@@ -21,7 +23,10 @@ class Fake(FakeMessagesListChatModel):
             payload = json.loads(messages[-1].content)
             self.calls.append((schema, payload, messages[0].content))
             if schema.__name__ in self.scripts and self.scripts[schema.__name__]:
-                return schema.model_validate(self.scripts[schema.__name__].pop(0))
+                output = self.scripts[schema.__name__].pop(0)
+                if isinstance(output, Exception):
+                    raise output
+                return schema.model_validate(output)
             if not self.auto_select:
                 return schema.model_validate_json(self.invoke(messages).content)
             return automatic(schema, payload)
@@ -31,6 +36,16 @@ class Fake(FakeMessagesListChatModel):
 def client(*outputs, scripts=None):
     return Fake(auto_select=not outputs, scripts=scripts or {},
                 responses=[AIMessage(content=json.dumps(output)) for output in outputs] or [AIMessage(content="unused")])
+
+
+def tool_use_failed(*, wrapped=False, code="tool_use_failed"):
+    """Real SDK exception for an offline missing-conflicts provider response."""
+    detail = {"code": code, "message": "private-provider-detail",
+              "failed_generation": json.dumps({"approved": True, "explanation": "safe"})}
+    body = {"error": detail} if wrapped else detail
+    response = httpx.Response(400, json={"error": detail},
+                              request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"))
+    return BadRequestError("private-provider-detail", response=response, body=body)
 
 
 def automatic(schema, data):

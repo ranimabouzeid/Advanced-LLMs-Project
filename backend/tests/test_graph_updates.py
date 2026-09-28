@@ -37,7 +37,7 @@ def planned(initial):
 
 def approved(initial):
     state = planned(initial)
-    return merge(state, record_safety(state, SafetyDecision(approved=True, explanation="Mock approval")))
+    return merge(state, record_safety(state, SafetyDecision(approved=True, conflicts=(), explanation="Mock approval")))
 
 
 def test_compiled_graph_partial_update_evolution(initial):
@@ -65,7 +65,7 @@ def test_compiled_graph_partial_update_evolution(initial):
         lambda s: select_order(s, OrderSelection(order_id="o", explanation="First pending")),
         lambda s: select_robot(s, "robot-1"),
         lambda s: fresh_plan(s, plan_delivery(s.warehouse, "o", "robot-1")),
-        lambda s: record_safety(s, SafetyDecision(approved=True, explanation="Mock approval")),
+        lambda s: record_safety(s, SafetyDecision(approved=True, conflicts=(), explanation="Mock approval")),
         mutate,
         lambda s: replan(s, plan_delivery(s.warehouse, "o", "robot-1")),
         lambda s: fresh_plan(s, plan_delivery(s.warehouse, "o", "robot-1")),
